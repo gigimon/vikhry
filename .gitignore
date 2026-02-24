@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+
+# Local env
+.venv/

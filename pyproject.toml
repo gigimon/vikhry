@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vikhry"
+version = "0.1.0"
+description = "Async distributed load-testing framework contracts and runtime"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "orjson>=3.11.0",
+    "pyreqwest>=0.10.1",
+    "redis>=7.2.0",
+    "robyn>=0.78.0",
+]
+
+[project.scripts]
+vikhryctl = "vikhry.cli:main"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=1.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_classes = ["Spec"]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that require dockerized redis",
+    "resilience: crash/recovery and degraded-path scenarios",
+]
