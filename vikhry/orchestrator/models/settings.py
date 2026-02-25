@@ -8,6 +8,7 @@ class OrchestratorSettings:
     host: str = "127.0.0.1"
     port: int = 8080
     redis_url: str = "redis://127.0.0.1:6379/0"
+    scenario: str | None = None
     heartbeat_timeout_s: int = 15
     worker_scan_interval_s: int = 5
     metrics_poll_interval_s: float = 1.0

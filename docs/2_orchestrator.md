@@ -62,8 +62,8 @@
    - проверяет `test:state`; если не `IDLE`, возвращает ошибку;
    - ставит `test:state=PREPARING`, увеличивает `test:epoch`;
    - создает/дополняет ресурсы;
-   - распределяет пользователей по worker'ам round-robin и отправляет серию `add_user`;
    - отправляет `start_test` каждому alive worker;
+   - распределяет пользователей по worker'ам round-robin и отправляет серию `add_user`;
    - ставит `test:state=RUNNING`.
 3. При `change_users`:
    - вычисляет дельту;
@@ -75,6 +75,11 @@
    - очищает пользовательские ключи;
    - не очищает ресурсы;
    - ставит `test:state=IDLE`.
+
+### Примечание по согласованности с worker MVP
+
+Worker в MVP переключает `epoch` только на `start_test`, поэтому orchestrator в `start_test`
+сначала отправляет `start_test`, и только затем `add_user`.
 
 ## API эндпоинты (v1)
 

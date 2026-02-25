@@ -10,6 +10,7 @@ from robyn import Robyn
 from vikhry.orchestrator.api.routes import register_routes
 from vikhry.orchestrator.models.settings import OrchestratorSettings
 from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
+from vikhry.orchestrator.scenario_loader import load_resource_names_from_scenario
 from vikhry.orchestrator.services.lifecycle_service import LifecycleService
 from vikhry.orchestrator.services.metrics_service import MetricsService
 from vikhry.orchestrator.services.resource_service import ResourceService
@@ -36,6 +37,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
     app = Robyn(file_object=__file__)
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     state_repo = TestStateRepository(redis_client)
+    scenario_resource_names = load_resource_names_from_scenario(settings.scenario)
     worker_presence = WorkerPresenceService(
         state_repo=state_repo,
         heartbeat_timeout_s=settings.heartbeat_timeout_s,
@@ -50,6 +52,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
     )
     resource_service = ResourceService(
         state_repo=state_repo,
+        scenario_resource_names=scenario_resource_names,
         default_prepare_counts={},
     )
     user_orchestration = UserOrchestrationService(

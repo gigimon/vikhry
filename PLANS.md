@@ -83,3 +83,75 @@
 [x] Проверить отказоустойчивость: нет worker'ов, просроченный heartbeat, дублирующие команды.
 [ ] Добавить structured logging и базовые метрики orchestrator (latency API, rate команд, ошибки).
 [x] Обновить `README.md` и `docs/` с фактическим поведением реализации.
+
+# Worker v1 Description
+
+Цель: реализовать `worker` для v1 в поэтапной модели (control-plane MVP -> runtime сценариев):
+- итерация 1: только control-plane (команды, heartbeat, lifecycle, CLI), без исполнения нагрузочного DSL;
+- итерация 2: запуск реальных VU сценариев и публикация метрик нагрузки.
+
+Зафиксированные решения:
+- обработка команд строго по очереди в одном event loop (single-threaded dispatcher);
+- `epoch` переключается только на `start_test`;
+- для согласованности изменить порядок команд orchestrator на `start_test -> add_user`;
+- `start_test` в worker на этапе MVP выполняет только переключение локального состояния (заглушка);
+- graceful stop с таймаутом и fallback в принудительное завершение локальных задач;
+- `worker_id` автогенерируется при старте как короткий id (`uuid4().hex[:8]`);
+- в MVP нет синтетических и внутренних метрик worker, только healthcheck в Redis.
+
+Технологический стек:
+- Python 3.14
+- asyncio + uvloop
+- redis.asyncio
+- orjson
+- Typer
+
+# Worker v1 Implementation
+
+## Step 11: Каркас worker процесса и настройки
+[x] Создать модульную структуру `vikhry/worker` (`app`, `models`, `services`, `redis_repo`).
+[x] Добавить `WorkerSettings` и bootstrap процесса (uvloop, Redis, graceful shutdown hooks).
+[x] Переиспользовать command contract (`CommandEnvelope`, payload-модели) без дублирования схем.
+[x] Ввести локальное состояние worker (`phase`, `current_epoch`, `assigned_users`).
+
+## Step 12: Регистрация worker и heartbeat
+[x] При старте регистрировать worker в `workers` и публиковать `worker:{id}:status`.
+[x] Реализовать heartbeat loop с обновлением `status=healthy` и `last_heartbeat`.
+[x] На штатной остановке выполнять unregister (`workers`, `worker:{id}:status`, `worker:{id}:users`).
+[x] Добавить best-effort перевод в `unhealthy` перед shutdown.
+
+## Step 13: Command loop и epoch-gating
+[x] Подписка на персональный канал `worker:{worker_id}:commands` через Redis Pub/Sub.
+[x] Реализовать последовательный dispatcher (команды обрабатываются строго по одной).
+[x] Правила epoch: `start_test` с большим epoch переключает эпоху; команды со старым epoch игнорируются.
+[x] Для невалидного JSON и неизвестного `type` делать ignore + лог (без падения процесса).
+
+## Step 14: Обработчики команд (MVP без VU runtime)
+[x] `start_test`: идемпотентно переводить worker в `RUNNING` (заглушка без запуска VU).
+[x] `add_user`: идемпотентно обновлять локальный набор назначенных пользователей.
+[x] `remove_user`: идемпотентно удалять пользователя из локального набора.
+[x] `stop_test`: выполнять graceful stop с таймаутом, очищать локальное состояние и переходить в `IDLE`.
+
+## Step 15: CLI-интеграция worker
+[x] Добавить группу `vikhry worker` в Typer.
+[x] Реализовать `vikhry worker start` с режимами `--detach/--foreground`.
+[x] Добавить PID/log/startup контроль, совместимый с паттерном orchestrator CLI.
+[x] Реализовать `vikhry worker stop` с каскадом сигналов (`SIGINT -> SIGTERM -> SIGKILL --force`).
+
+## Step 16: Генерация и идентификация worker_id
+[x] По умолчанию генерировать короткий `worker_id` (`uuid4().hex[:8]`).
+[x] Выводить `worker_id` в CLI/log при старте для операционной диагностики.
+[x] Гарантировать использование одного `worker_id` во всех Redis ключах текущего процесса.
+[ ] Задокументировать формат id и возможные коллизии (best-effort, редкий случай).
+
+## Step 17: Совместимость orchestrator <-> worker
+[x] Изменить lifecycle orchestrator: отправка `start_test` перед серией `add_user`.
+[x] Обновить unit/integration тесты orchestrator под новый порядок доставки команд.
+[ ] Проверить идемпотентность при повторных `start_test/add_user/remove_user/stop_test`.
+[x] Синхронизировать docs/contracts с фактическим порядком команд.
+
+## Step 18: Тестирование worker MVP и документация
+[x] Unit tests для command dispatcher, epoch-gating и идемпотентных обработчиков.
+[x] Integration tests с Redis: регистрация heartbeat, обработка команд, graceful stop.
+[x] E2E smoke: orchestrator + worker + CLI (`start/change-users/stop`) без падений и рассинхрона.
+[x] Обновить README и `docs/3_worker.md` под реализованный MVP и ограничения (без DSL runtime).

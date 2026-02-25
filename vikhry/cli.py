@@ -9,6 +9,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
+from uuid import uuid4
 
 import orjson
 import typer
@@ -16,6 +17,8 @@ from pyreqwest.client import SyncClientBuilder
 from pyreqwest.exceptions import PyreqwestError
 
 from vikhry.orchestrator.models.settings import OrchestratorSettings
+from vikhry.orchestrator.scenario_loader import ScenarioLoadError
+from vikhry.worker.models.settings import WorkerSettings
 
 app = typer.Typer(
     name="vikhry",
@@ -24,12 +27,40 @@ app = typer.Typer(
 )
 orchestrator_app = typer.Typer(no_args_is_help=True)
 test_app = typer.Typer(no_args_is_help=True)
+worker_app = typer.Typer(no_args_is_help=True)
 app.add_typer(orchestrator_app, name="orchestrator")
 app.add_typer(test_app, name="test")
+app.add_typer(worker_app, name="worker")
 
 DEFAULT_ORCHESTRATOR_URL = "http://127.0.0.1:8080"
-DEFAULT_PID_FILE = Path(".vikhry-orchestrator.pid")
-DEFAULT_LOG_FILE = Path(".vikhry-orchestrator.log")
+
+
+def _default_runtime_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches"
+
+    if sys.platform.startswith("linux"):
+        xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg_runtime_dir:
+            xdg_path = Path(xdg_runtime_dir)
+            if xdg_path.is_dir() and os.access(xdg_path, os.W_OK):
+                return xdg_path
+
+        run_user_dir = Path("/run/user") / str(os.getuid())
+        if run_user_dir.is_dir() and os.access(run_user_dir, os.W_OK):
+            return run_user_dir
+
+        return Path("/tmp")
+
+    # Non-target platforms fallback to temporary directory.
+    return Path("/tmp")
+
+
+DEFAULT_RUNTIME_DIR = _default_runtime_dir() / "vikhry"
+DEFAULT_PID_FILE = DEFAULT_RUNTIME_DIR / "orchestrator.pid"
+DEFAULT_LOG_FILE = DEFAULT_RUNTIME_DIR / "orchestrator.log"
+DEFAULT_WORKER_PID_FILE = DEFAULT_RUNTIME_DIR / "worker.pid"
+DEFAULT_WORKER_LOG_FILE = DEFAULT_RUNTIME_DIR / "worker.log"
 
 
 @orchestrator_app.command("start")
@@ -37,6 +68,13 @@ def orchestrator_start(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8080,
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
+    scenario: Annotated[
+        Path | None,
+        typer.Option(
+            "--scenario",
+            help="Path to Python scenario file. Resource decorators will be parsed for PREPARING.",
+        ),
+    ] = None,
     heartbeat_timeout_s: Annotated[int, typer.Option("--heartbeat-timeout-s", min=1)] = 15,
     worker_scan_interval_s: Annotated[int, typer.Option("--worker-scan-interval-s", min=1)] = 5,
     metrics_poll_interval_s: Annotated[
@@ -70,6 +108,7 @@ def orchestrator_start(
         host=host,
         port=port,
         redis_url=redis_url,
+        scenario=str(scenario) if scenario else None,
         heartbeat_timeout_s=heartbeat_timeout_s,
         worker_scan_interval_s=worker_scan_interval_s,
         metrics_poll_interval_s=metrics_poll_interval_s,
@@ -94,6 +133,7 @@ def orchestrator_serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8080,
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
+    scenario: Annotated[Path | None, typer.Option("--scenario")] = None,
     heartbeat_timeout_s: Annotated[int, typer.Option("--heartbeat-timeout-s", min=1)] = 15,
     worker_scan_interval_s: Annotated[int, typer.Option("--worker-scan-interval-s", min=1)] = 5,
     metrics_poll_interval_s: Annotated[
@@ -115,6 +155,7 @@ def orchestrator_serve(
         host=host,
         port=port,
         redis_url=redis_url,
+        scenario=str(scenario) if scenario else None,
         heartbeat_timeout_s=heartbeat_timeout_s,
         worker_scan_interval_s=worker_scan_interval_s,
         metrics_poll_interval_s=metrics_poll_interval_s,
@@ -168,6 +209,177 @@ def orchestrator_stop(
             ) from exc
         _remove_pid_file_if_matches(pid_file, pid)
         typer.echo(f"Orchestrator process {pid} force-stopped.")
+        raise typer.Exit(code=0)
+
+    raise typer.Exit(
+        code=_error(
+            f"Process {pid} did not stop within {timeout_s:.1f}s. "
+            "Use `--force` to send SIGKILL."
+        )
+    )
+
+
+@worker_app.command("start")
+def worker_start(
+    redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
+    worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
+    heartbeat_interval_s: Annotated[
+        float, typer.Option("--heartbeat-interval-s", min=0.1)
+    ] = 3.0,
+    command_poll_timeout_s: Annotated[
+        float, typer.Option("--command-poll-timeout-s", min=0.1)
+    ] = 1.0,
+    graceful_stop_timeout_s: Annotated[
+        float, typer.Option("--graceful-stop-timeout-s", min=0.1)
+    ] = 5.0,
+    scenario: Annotated[
+        str,
+        typer.Option(
+            "--scenario",
+            help="Scenario import path in `module.path:ClassName` format.",
+        ),
+    ] = "vikhry.runtime.defaults:IdleVU",
+    http_base_url: Annotated[
+        str,
+        typer.Option(
+            "--http-base-url",
+            help="Base URL for scenario HTTP calls that use relative paths.",
+        ),
+    ] = "",
+    vu_idle_sleep_s: Annotated[
+        float,
+        typer.Option(
+            "--vu-idle-sleep-s",
+            min=0.01,
+            help="Sleep interval when scenario has no eligible steps.",
+        ),
+    ] = 0.05,
+    detach: Annotated[
+        bool,
+        typer.Option(
+            "--detach/--foreground",
+            help="Run worker in background and return control to terminal.",
+        ),
+    ] = True,
+    startup_timeout_s: Annotated[float, typer.Option("--startup-timeout-s", min=0.1)] = 10.0,
+    log_file: Annotated[Path, typer.Option("--log-file")] = DEFAULT_WORKER_LOG_FILE,
+    pid_file: Annotated[Path, typer.Option("--pid-file")] = DEFAULT_WORKER_PID_FILE,
+) -> None:
+    resolved_worker_id = _resolve_worker_id(worker_id)
+    settings = WorkerSettings(
+        redis_url=redis_url,
+        worker_id=resolved_worker_id,
+        heartbeat_interval_s=heartbeat_interval_s,
+        command_poll_timeout_s=command_poll_timeout_s,
+        graceful_stop_timeout_s=graceful_stop_timeout_s,
+        scenario=scenario,
+        http_base_url=http_base_url,
+        vu_idle_sleep_s=vu_idle_sleep_s,
+    )
+    if detach:
+        _start_worker_detached_or_exit(
+            settings=settings,
+            pid_file=pid_file,
+            log_file=log_file,
+            startup_timeout_s=startup_timeout_s,
+        )
+        return
+    typer.echo(f"Starting worker in foreground (worker_id={resolved_worker_id}).")
+    _run_worker_foreground(settings=settings, pid_file=pid_file)
+
+
+@worker_app.command("serve", hidden=True)
+def worker_serve(
+    redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
+    worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
+    heartbeat_interval_s: Annotated[
+        float, typer.Option("--heartbeat-interval-s", min=0.1)
+    ] = 3.0,
+    command_poll_timeout_s: Annotated[
+        float, typer.Option("--command-poll-timeout-s", min=0.1)
+    ] = 1.0,
+    graceful_stop_timeout_s: Annotated[
+        float, typer.Option("--graceful-stop-timeout-s", min=0.1)
+    ] = 5.0,
+    scenario: Annotated[
+        str,
+        typer.Option(
+            "--scenario",
+            help="Scenario import path in `module.path:ClassName` format.",
+        ),
+    ] = "vikhry.runtime.defaults:IdleVU",
+    http_base_url: Annotated[
+        str,
+        typer.Option(
+            "--http-base-url",
+            help="Base URL for scenario HTTP calls that use relative paths.",
+        ),
+    ] = "",
+    vu_idle_sleep_s: Annotated[
+        float,
+        typer.Option(
+            "--vu-idle-sleep-s",
+            min=0.01,
+            help="Sleep interval when scenario has no eligible steps.",
+        ),
+    ] = 0.05,
+    pid_file: Annotated[Path, typer.Option("--pid-file")] = DEFAULT_WORKER_PID_FILE,
+) -> None:
+    settings = WorkerSettings(
+        redis_url=redis_url,
+        worker_id=_resolve_worker_id(worker_id),
+        heartbeat_interval_s=heartbeat_interval_s,
+        command_poll_timeout_s=command_poll_timeout_s,
+        graceful_stop_timeout_s=graceful_stop_timeout_s,
+        scenario=scenario,
+        http_base_url=http_base_url,
+        vu_idle_sleep_s=vu_idle_sleep_s,
+    )
+    _run_worker_foreground(settings=settings, pid_file=pid_file)
+
+
+@worker_app.command("stop")
+def worker_stop(
+    pid_file: Annotated[Path, typer.Option("--pid-file")] = DEFAULT_WORKER_PID_FILE,
+    timeout_s: Annotated[float, typer.Option("--timeout-s", min=0.1)] = 10.0,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    pid = _read_worker_pid_or_exit(pid_file)
+    if pid == os.getpid():
+        raise typer.Exit(
+            code=_error(
+                "PID file points to current process; refusing self-termination. "
+                "Run stop from another shell."
+            )
+        )
+
+    if not _is_process_alive(pid):
+        _remove_pid_file_if_matches(pid_file, pid)
+        raise typer.Exit(
+            code=_error(
+                f"Process {pid} is not running. Removed stale pid file `{pid_file}`."
+            )
+        )
+
+    if _send_stop_signal_and_wait(pid, signal.SIGINT, timeout_s * 0.5):
+        _remove_pid_file_if_matches(pid_file, pid)
+        typer.echo(f"Worker process {pid} stopped.")
+        raise typer.Exit(code=0)
+
+    if _send_stop_signal_and_wait(pid, signal.SIGTERM, timeout_s * 0.5):
+        _remove_pid_file_if_matches(pid_file, pid)
+        typer.echo(f"Worker process {pid} stopped.")
+        raise typer.Exit(code=0)
+
+    if force:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError as exc:
+            raise typer.Exit(
+                code=_error(f"Failed to force-stop process {pid} with SIGKILL: {exc}")
+            ) from exc
+        _remove_pid_file_if_matches(pid_file, pid)
+        typer.echo(f"Worker process {pid} force-stopped.")
         raise typer.Exit(code=0)
 
     raise typer.Exit(
@@ -237,7 +449,21 @@ def _run_orchestrator_foreground(settings: OrchestratorSettings, pid_file: Path)
     _ensure_pid_file_writable_or_exit(pid_file)
     _write_pid_file_or_exit(pid_file)
     try:
-        run_orchestrator(settings)
+        try:
+            run_orchestrator(settings)
+        except ScenarioLoadError as exc:
+            raise typer.Exit(code=_error(str(exc))) from exc
+    finally:
+        _remove_pid_file_if_matches(pid_file, os.getpid())
+
+
+def _run_worker_foreground(settings: WorkerSettings, pid_file: Path) -> None:
+    from vikhry.worker.app import run_worker
+
+    _ensure_pid_file_writable_or_exit(pid_file)
+    _write_worker_pid_file_or_exit(pid_file)
+    try:
+        run_worker(settings)
     finally:
         _remove_pid_file_if_matches(pid_file, os.getpid())
 
@@ -284,6 +510,8 @@ def _start_orchestrator_detached_or_exit(
         "--pid-file",
         str(pid_file),
     ]
+    if settings.scenario:
+        command.extend(["--scenario", settings.scenario])
 
     try:
         with log_file.open("ab") as log_handle:
@@ -330,6 +558,88 @@ def _start_orchestrator_detached_or_exit(
     )
 
 
+def _start_worker_detached_or_exit(
+    *,
+    settings: WorkerSettings,
+    pid_file: Path,
+    log_file: Path,
+    startup_timeout_s: float,
+) -> None:
+    _ensure_pid_file_writable_or_exit(pid_file)
+    _ensure_no_active_worker_or_exit(pid_file)
+
+    log_parent = log_file.parent if log_file.parent != Path("") else Path(".")
+    log_parent.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        sys.executable,
+        "-m",
+        "vikhry.cli",
+        "worker",
+        "serve",
+        "--redis-url",
+        settings.redis_url,
+        "--worker-id",
+        settings.worker_id,
+        "--heartbeat-interval-s",
+        str(settings.heartbeat_interval_s),
+        "--command-poll-timeout-s",
+        str(settings.command_poll_timeout_s),
+        "--graceful-stop-timeout-s",
+        str(settings.graceful_stop_timeout_s),
+        "--scenario",
+        settings.scenario,
+        "--http-base-url",
+        settings.http_base_url,
+        "--vu-idle-sleep-s",
+        str(settings.vu_idle_sleep_s),
+        "--pid-file",
+        str(pid_file),
+    ]
+
+    try:
+        with log_file.open("ab") as log_handle:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=log_handle,
+                start_new_session=True,
+                close_fds=True,
+            )
+    except OSError as exc:
+        raise typer.Exit(code=_error(f"Failed to spawn worker process: {exc}")) from exc
+
+    deadline = time.time() + startup_timeout_s
+    while time.time() < deadline:
+        pid = _read_pid(pid_file)
+        if pid is not None and _is_process_alive(pid):
+            typer.echo(
+                f"Worker started in background (worker_id={settings.worker_id}, pid={pid}). "
+                f"Logs: {log_file}, pid file: {pid_file}"
+            )
+            raise typer.Exit(code=0)
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+
+    if process.poll() is None:
+        _send_stop_signal_and_wait(process.pid, signal.SIGINT, 1.0)
+    if process.poll() is None:
+        _send_stop_signal_and_wait(process.pid, signal.SIGTERM, 1.0)
+    if process.poll() is None:
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    tail = _tail_file(log_file, max_lines=20)
+    tail_suffix = f"\nRecent logs:\n{tail}" if tail else ""
+    raise typer.Exit(
+        code=_error(f"Worker failed to start within {startup_timeout_s:.1f}s.{tail_suffix}")
+    )
+
+
 def _ensure_pid_file_writable_or_exit(pid_file: Path) -> None:
     parent = pid_file.parent if pid_file.parent != Path("") else Path(".")
     parent.mkdir(parents=True, exist_ok=True)
@@ -352,6 +662,21 @@ def _write_pid_file_or_exit(pid_file: Path) -> None:
         raise typer.Exit(code=_error(f"Cannot write pid file `{pid_file}`: {exc}")) from exc
 
 
+def _write_worker_pid_file_or_exit(pid_file: Path) -> None:
+    existing_pid = _read_pid(pid_file)
+    if existing_pid is not None and _is_process_alive(existing_pid):
+        raise typer.Exit(
+            code=_error(
+                f"Worker seems already running with pid={existing_pid}. "
+                f"Use `vikhry worker stop --pid-file {pid_file}` first."
+            )
+        )
+    try:
+        pid_file.write_text(str(os.getpid()), encoding="ascii")
+    except OSError as exc:
+        raise typer.Exit(code=_error(f"Cannot write pid file `{pid_file}`: {exc}")) from exc
+
+
 def _ensure_no_active_orchestrator_or_exit(pid_file: Path) -> None:
     existing_pid = _read_pid(pid_file)
     if existing_pid is None:
@@ -361,6 +686,20 @@ def _ensure_no_active_orchestrator_or_exit(pid_file: Path) -> None:
             code=_error(
                 f"Orchestrator seems already running with pid={existing_pid}. "
                 f"Use `vikhry orchestrator stop --pid-file {pid_file}` first."
+            )
+        )
+    _remove_pid_file_if_matches(pid_file, existing_pid)
+
+
+def _ensure_no_active_worker_or_exit(pid_file: Path) -> None:
+    existing_pid = _read_pid(pid_file)
+    if existing_pid is None:
+        return
+    if _is_process_alive(existing_pid):
+        raise typer.Exit(
+            code=_error(
+                f"Worker seems already running with pid={existing_pid}. "
+                f"Use `vikhry worker stop --pid-file {pid_file}` first."
             )
         )
     _remove_pid_file_if_matches(pid_file, existing_pid)
@@ -388,6 +727,18 @@ def _read_pid_or_exit(pid_file: Path) -> int:
             code=_error(
                 f"Cannot read orchestrator pid from `{pid_file}`. "
                 "Start orchestrator first or pass correct `--pid-file`."
+            )
+        )
+    return pid
+
+
+def _read_worker_pid_or_exit(pid_file: Path) -> int:
+    pid = _read_pid(pid_file)
+    if pid is None:
+        raise typer.Exit(
+            code=_error(
+                f"Cannot read worker pid from `{pid_file}`. "
+                "Start worker first or pass correct `--pid-file`."
             )
         )
     return pid
@@ -444,6 +795,14 @@ def _tail_file(path: Path, max_lines: int = 20) -> str:
     if not lines:
         return ""
     return "\n".join(lines[-max_lines:])
+
+
+def _resolve_worker_id(worker_id: str | None) -> str:
+    if worker_id is not None:
+        normalized = worker_id.strip()
+        if normalized:
+            return normalized
+    return uuid4().hex[:8]
 
 
 def _call_orchestrator_json(

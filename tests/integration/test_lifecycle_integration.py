@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from vikhry.orchestrator.models.worker import WorkerHealthStatus, WorkerStatus
@@ -125,3 +127,39 @@ async def test_duplicate_add_and_remove_commands_are_idempotent_spec(
     assert second_remove["skipped_missing"] == ["2"]
     assert await state_repo.list_users() == ["1"]
 
+
+@pytest.mark.asyncio
+async def test_start_sends_start_before_add_commands_spec(
+    state_repo: TestStateRepository,
+) -> None:
+    now_ts = 10_000
+    _, _, lifecycle = _build_services(state_repo, now_ts=now_ts)
+
+    await state_repo.register_worker("w1")
+    await state_repo.set_worker_status(
+        "w1",
+        WorkerStatus(status=WorkerHealthStatus.HEALTHY, last_heartbeat=now_ts),
+    )
+
+    channel = state_repo.worker_command_channel("w1")
+    pubsub = state_repo._redis.pubsub(ignore_subscribe_messages=True)  # noqa: SLF001
+    await pubsub.subscribe(channel)
+
+    try:
+        await lifecycle.start_test(target_users=2)
+
+        command_types: list[str] = []
+        deadline = time.monotonic() + 2.0
+        while len(command_types) < 3 and time.monotonic() < deadline:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2)
+            if not message or message.get("type") != "message":
+                continue
+            raw = message.get("data")
+            if raw is None:
+                continue
+            command_types.append(state_repo.decode_command(raw).type.value)
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.aclose()
+
+    assert command_types[:3] == ["start_test", "add_user", "add_user"]

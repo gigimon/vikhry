@@ -7,7 +7,10 @@ from robyn import Request, Response, Robyn
 from robyn.ws import WebSocketDisconnect
 
 from vikhry.orchestrator.models.api import ChangeUsersRequest, StartTestRequest
-from vikhry.orchestrator.models.resource import CreateResourceRequest
+from vikhry.orchestrator.models.resource import (
+    CreateResourceRequest,
+    EnsureResourceCountRequest,
+)
 from vikhry.orchestrator.services.lifecycle_service import (
     InvalidStateTransitionError,
     LifecycleService,
@@ -70,6 +73,22 @@ def register_routes(
             result = await resource_service.create_resources(
                 resource_name=model.name,
                 count=model.count,
+                payload=model.payload,
+            )
+            return result.model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
+    @app.post("/ensure_resource")
+    async def ensure_resource(request: Request) -> dict[str, object] | Response:
+        try:
+            payload = _parse_json_object(request)
+            if "resource_name" in payload and "name" not in payload:
+                payload["name"] = payload.pop("resource_name")
+            model = EnsureResourceCountRequest.model_validate(payload)
+            result = await resource_service.ensure_resource_count(
+                resource_name=model.name,
+                target_count=model.count,
                 payload=model.payload,
             )
             return result.model_dump(mode="json")

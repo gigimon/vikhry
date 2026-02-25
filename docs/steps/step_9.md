@@ -17,6 +17,8 @@
 [x] Реализованы команды orchestrator:
   - `vikhry orchestrator start`
   - `vikhry orchestrator stop`
+[x] В `orchestrator start` добавлен `--scenario` (путь до Python-файла сценария),
+   который передается в orchestrator runtime.
 [x] Для `orchestrator stop` добавлен PID-based контроль процесса:
   - `--pid-file`
   - каскадный graceful stop (`SIGINT -> SIGTERM`)
@@ -25,6 +27,8 @@
   - background запуск с возвратом управления в терминал;
   - `--foreground` для блокирующего запуска;
   - `--log-file` и `--startup-timeout-s` для операционной диагностики.
+[x] Дефолтные `pid/log` пути перенесены в системный runtime-каталог
+    (macOS/Linux), вместо рабочей директории.
 [x] Реализованы test-команды через HTTP к orchestrator:
   - `vikhry test start --users ...`
   - `vikhry test change-users --users ...`

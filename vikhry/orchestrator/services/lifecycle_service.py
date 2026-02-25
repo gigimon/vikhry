@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -8,6 +9,8 @@ from vikhry.orchestrator.models.user import UserRuntimeStatus
 from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
 from vikhry.orchestrator.services.resource_service import ResourceService
 from vikhry.orchestrator.services.user_orchestration import UserOrchestrationService
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidStateTransitionError(RuntimeError):
@@ -86,9 +89,9 @@ class LifecycleService:
 
         try:
             prepare_result = await self._prepare_resources(target_users)
+            start_result = await self._user_orchestration.send_start_test(epoch, target_users)
             user_ids = list(range(1, target_users + 1))
             add_result = await self._user_orchestration.add_users(user_ids, epoch)
-            start_result = await self._user_orchestration.send_start_test(epoch, target_users)
             await self._state_repo.set_all_users_status(
                 status=UserRuntimeStatus.RUNNING,
                 updated_at=self._now_ts(),
@@ -102,6 +105,10 @@ class LifecycleService:
                 start_result=start_result,
             )
         except Exception:  # noqa: BLE001
+            try:
+                await self._user_orchestration.send_stop_test(epoch)
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to rollback worker run state on start_test error")
             # Rollback to stable state for v1 if start sequence failed.
             await self._state_repo.clear_users_data()
             await self._state_repo.set_state(TestState.IDLE)
@@ -133,11 +140,13 @@ class LifecycleService:
             )
 
         if target_users > current_users:
+            prepare_result = await self._prepare_resources(target_users)
             user_ids = self._new_user_ids(
                 existing_user_ids=current_user_ids,
                 count=target_users - current_users,
             )
             add_result = await self._user_orchestration.add_users(user_ids, epoch)
+            add_result["prepare_result"] = prepare_result
             return ChangeUsersResult(
                 epoch=epoch,
                 target_users=target_users,

@@ -9,7 +9,12 @@ from vikhry.orchestrator.models.command import (
     StartTestPayload,
     StopTestPayload,
 )
-from vikhry.orchestrator.models.resource import CreateResourceRequest, CreateResourceResult
+from vikhry.orchestrator.models.resource import (
+    CreateResourceRequest,
+    CreateResourceResult,
+    EnsureResourceCountRequest,
+    EnsureResourceCountResult,
+)
 from vikhry.orchestrator.models.settings import OrchestratorSettings
 from vikhry.orchestrator.models.test_state import TestState
 from vikhry.orchestrator.models.user import UserAssignment, UserRuntimeStatus
@@ -22,6 +27,8 @@ __all__ = [
     "CommandType",
     "CreateResourceRequest",
     "CreateResourceResult",
+    "EnsureResourceCountRequest",
+    "EnsureResourceCountResult",
     "OrchestratorSettings",
     "RemoveUserPayload",
     "StartTestPayload",

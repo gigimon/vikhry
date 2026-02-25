@@ -53,8 +53,10 @@ class _FakeUserOrchestration:
     def __init__(self, state_repo: _FakeStateRepo) -> None:
         self._state_repo = state_repo
         self.fail_start = False
+        self.calls: list[str] = []
 
     async def add_users(self, user_ids, epoch):  # noqa: ANN001
+        self.calls.append("add_users")
         self._state_repo.users.extend(str(user_id) for user_id in user_ids)
         return {"requested": len(user_ids)}
 
@@ -66,6 +68,7 @@ class _FakeUserOrchestration:
         return {"requested": len(user_ids)}
 
     async def send_start_test(self, epoch, target_users):  # noqa: ANN001
+        self.calls.append("send_start_test")
         if self.fail_start:
             raise RuntimeError("start failed")
         return {"delivered": 1}
@@ -82,14 +85,16 @@ class _FakeResourceService:
 @pytest.mark.asyncio
 async def test_lifecycle_happy_path_spec() -> None:
     repo = _FakeStateRepo()
+    user_orchestration = _FakeUserOrchestration(repo)
     service = LifecycleService(
         state_repo=repo,  # type: ignore[arg-type]
-        user_orchestration=_FakeUserOrchestration(repo),  # type: ignore[arg-type]
+        user_orchestration=user_orchestration,  # type: ignore[arg-type]
         resource_service=_FakeResourceService(),  # type: ignore[arg-type]
     )
 
     started = await service.start_test(target_users=3)
     assert started.epoch == 1
+    assert user_orchestration.calls[:2] == ["send_start_test", "add_users"]
     assert repo.state == TestState.RUNNING
     assert len(repo.users) == 3
 
@@ -132,4 +137,3 @@ async def test_lifecycle_change_users_guard_spec() -> None:
 
     with pytest.raises(InvalidStateTransitionError):
         await service.change_users(target_users=5)
-
