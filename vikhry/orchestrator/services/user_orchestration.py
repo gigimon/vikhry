@@ -106,11 +106,19 @@ class UserOrchestrationService:
             "skipped_missing": skipped_missing,
         }
 
-    async def send_start_test(self, epoch: int, target_users: int) -> dict[str, Any]:
+    async def send_start_test(
+        self,
+        epoch: int,
+        target_users: int,
+        init_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         workers = await self._worker_presence.require_alive_workers()
         command = self._make_command(
             CommandType.START_TEST,
-            StartTestPayload(target_users=target_users),
+            StartTestPayload(
+                target_users=target_users,
+                init_params=dict(init_params or {}),
+            ),
             epoch,
         )
         delivered = await self._publish_to_workers(workers, command)
@@ -148,4 +156,3 @@ class UserOrchestrationService:
 
     def _now_ts(self) -> int:
         return int(self._now_fn())
-

@@ -16,6 +16,10 @@ async def create_user(id, ctx):
 
 
 class MyVU(VU):
+    async def on_init(self, tenant: str, warmup: int = 1):
+        self.tenant = tenant
+        self.warmup = warmup
+
     async def on_start(self):
         self.user = await self.resources.acquire("users")
 
@@ -27,6 +31,13 @@ class MyVU(VU):
     async def create_order(self):
         await self.http.post("/order")
 ```
+
+Параметры `on_init` orchestrator извлекает из scenario-файла и отдает через:
+- `GET /scenario/on_init_params`
+
+Затем эти параметры можно передать в:
+- `POST /start_test` через поле `init_params`
+- `vikhry test start --init-param key=value` или `--init-params-json '{...}'`
 
 Сценарий запускается worker'ом через CLI:
 
@@ -41,7 +52,7 @@ vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://ap
   weight=1.0,
   every_s=None,
   requires=(),
-  timeout_s=None,
+  timeout=None,
 )
 ```
 
@@ -50,7 +61,7 @@ vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://ap
 - weight — участвует в weighted random выборе.
 - every_s — периодическое выполнение.
 - requires — указания тех степов, которые должны быть выполнены до этого шага. Это может быть полезно для создания зависимостей между шагами, например, чтобы гарантировать, что пользователь аутентифицирован перед созданием заказа.
-- timeout_s — максимальное время выполнения шага, после которого он будет считаться провалившимся.
+- timeout — максимальное время выполнения шага, после которого он будет считаться провалившимся.
 
 Runtime behavior:
 - шаги выбираются по weighted random среди eligible step;

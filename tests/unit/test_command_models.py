@@ -52,3 +52,15 @@ def test_require_payload_type_guard_spec() -> None:
     with pytest.raises(TypeError):
         command.require_payload(AddUserPayload)
 
+
+def test_start_test_payload_accepts_init_params_spec() -> None:
+    command = CommandEnvelope(
+        type=CommandType.START_TEST,
+        command_id="cmd-4",
+        epoch=1,
+        sent_at=1_761_571_200,
+        payload={"target_users": 2, "init_params": {"tenant": "acme", "warmup": 3}},
+    )
+
+    payload = command.require_payload(StartTestPayload)
+    assert payload.init_params == {"tenant": "acme", "warmup": 3}

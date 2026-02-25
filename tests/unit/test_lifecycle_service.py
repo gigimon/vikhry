@@ -67,11 +67,11 @@ class _FakeUserOrchestration:
                 self._state_repo.users.remove(user_id_str)
         return {"requested": len(user_ids)}
 
-    async def send_start_test(self, epoch, target_users):  # noqa: ANN001
+    async def send_start_test(self, epoch, target_users, init_params):  # noqa: ANN001
         self.calls.append("send_start_test")
         if self.fail_start:
             raise RuntimeError("start failed")
-        return {"delivered": 1}
+        return {"delivered": 1, "init_params": dict(init_params)}
 
     async def send_stop_test(self, epoch):  # noqa: ANN001
         return {"delivered": 1}
@@ -94,6 +94,7 @@ async def test_lifecycle_happy_path_spec() -> None:
 
     started = await service.start_test(target_users=3)
     assert started.epoch == 1
+    assert started.init_params == {}
     assert user_orchestration.calls[:2] == ["send_start_test", "add_users"]
     assert repo.state == TestState.RUNNING
     assert len(repo.users) == 3
@@ -137,3 +138,21 @@ async def test_lifecycle_change_users_guard_spec() -> None:
 
     with pytest.raises(InvalidStateTransitionError):
         await service.change_users(target_users=5)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_start_passes_init_params_to_orchestration_spec() -> None:
+    repo = _FakeStateRepo()
+    user_orchestration = _FakeUserOrchestration(repo)
+    service = LifecycleService(
+        state_repo=repo,  # type: ignore[arg-type]
+        user_orchestration=user_orchestration,  # type: ignore[arg-type]
+        resource_service=_FakeResourceService(),  # type: ignore[arg-type]
+    )
+
+    started = await service.start_test(
+        target_users=1,
+        init_params={"tenant": "demo", "warmup": 3},
+    )
+
+    assert started.init_params == {"tenant": "demo", "warmup": 3}

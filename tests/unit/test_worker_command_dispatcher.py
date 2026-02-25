@@ -203,8 +203,10 @@ async def test_dispatcher_ignores_invalid_raw_command_spec() -> None:
 async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    seen_init_params: dict[str, object] = {}
 
-    async def user_runtime(_user_id: str) -> None:
+    async def user_runtime(_user_id: str, init_params: dict[str, object]) -> None:
+        seen_init_params.update(init_params)
         started.set()
         try:
             await asyncio.Event().wait()
@@ -224,7 +226,7 @@ async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec()
         _command(
             CommandType.START_TEST,
             epoch=1,
-            payload=StartTestPayload(target_users=1),
+            payload=StartTestPayload(target_users=1, init_params={"tenant": "demo"}),
             command_id="start-1",
         )
     )
@@ -239,6 +241,7 @@ async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec()
 
     await asyncio.wait_for(started.wait(), timeout=1.0)
     assert "1" in state.user_tasks
+    assert seen_init_params == {"tenant": "demo"}
 
     await dispatcher._handle_command(  # noqa: SLF001
         _command(

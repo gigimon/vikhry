@@ -6,83 +6,15 @@ import inspect
 import logging
 import random
 import time
-from collections.abc import Awaitable
-from datetime import timedelta
 from typing import Any
 
-from pyreqwest.client import ClientBuilder
-
-from vikhry.runtime import VU, bind_steps
+from vikhry.runtime import VU, bind_steps, resolve_every_delay
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
+from vikhry.worker.services.resources import WorkerVUResources
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCENARIO_IMPORT = "vikhry.runtime.defaults:IdleVU"
-
-
-class WorkerVUHttpClient:
-    def __init__(self, *, base_url: str = "", timeout_s: float = 30.0) -> None:
-        builder = ClientBuilder().timeout(timedelta(seconds=max(0.1, timeout_s)))
-        if base_url:
-            builder = builder.base_url(base_url)
-        self._client = builder.build()
-
-    async def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        params: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-        json: Any = None,
-        data: bytes | str | None = None,
-    ) -> Any:
-        request_builder = self._client.request(method.upper(), url)
-        if params:
-            request_builder = request_builder.query(params)
-        if headers:
-            request_builder = request_builder.headers(headers)
-        if json is not None:
-            request_builder = request_builder.body_json(json)
-        elif data is not None:
-            if isinstance(data, str):
-                request_builder = request_builder.body_text(data)
-            else:
-                request_builder = request_builder.body_bytes(data)
-        consumed_request = request_builder.build()
-        return await _maybe_await(consumed_request.send())
-
-    async def get(self, url: str, **kwargs: Any) -> Any:
-        return await self.request("GET", url, **kwargs)
-
-    async def post(self, url: str, **kwargs: Any) -> Any:
-        return await self.request("POST", url, **kwargs)
-
-    async def put(self, url: str, **kwargs: Any) -> Any:
-        return await self.request("PUT", url, **kwargs)
-
-    async def patch(self, url: str, **kwargs: Any) -> Any:
-        return await self.request("PATCH", url, **kwargs)
-
-    async def delete(self, url: str, **kwargs: Any) -> Any:
-        return await self.request("DELETE", url, **kwargs)
-
-    async def close(self) -> None:
-        await _maybe_await(self._client.close())
-
-
-class WorkerVUResources:
-    def __init__(self, state_repo: WorkerStateRepository) -> None:
-        self._state_repo = state_repo
-
-    async def acquire(self, resource_name: str) -> dict[str, Any]:
-        payload = await self._state_repo.acquire_resource_data(resource_name)
-        if payload is None:
-            raise RuntimeError(f"resource pool `{resource_name}` is empty")
-        return payload
-
-    async def release(self, resource_name: str, resource_id: int | str) -> None:
-        await self._state_repo.release_resource(resource_name, resource_id)
 
 
 class WorkerVURuntime:
@@ -103,15 +35,19 @@ class WorkerVURuntime:
         self._metric_id = metric_id or f"worker:{worker_id}"
         self._idle_sleep_s = max(0.01, idle_sleep_s)
 
-    async def run_user(self, user_id: str) -> None:
-        http = WorkerVUHttpClient(base_url=self._http_base_url)
+    async def run_user(
+        self,
+        user_id: str,
+        init_params: dict[str, Any] | None = None,
+    ) -> None:
         resources = WorkerVUResources(self._state_repo)
         vu = self._vu_type(
             user_id=user_id,
             worker_id=self._worker_id,
-            http=http,
             resources=resources,
+            http_base_url=self._http_base_url,
         )
+        init_kwargs = dict(init_params or {})
 
         completed_steps: set[str] = set()
         next_allowed_at: dict[str, float] = {}
@@ -119,6 +55,11 @@ class WorkerVURuntime:
         steps = bind_steps(vu)
 
         try:
+            if init_kwargs:
+                await vu.on_init(**init_kwargs)
+            else:
+                await vu.on_init()
+            vu.ensure_http_client()
             await vu.on_start()
             while True:
                 now = time.monotonic()
@@ -159,7 +100,7 @@ class WorkerVURuntime:
             try:
                 await vu.on_stop()
             finally:
-                await http.close()
+                await vu.close()
 
     async def _execute_step(
         self,
@@ -177,10 +118,10 @@ class WorkerVURuntime:
         cancelled = False
 
         try:
-            if spec.timeout_s is None:
+            if spec.timeout is None:
                 result = await bound_step.call()
             else:
-                async with asyncio.timeout(spec.timeout_s):
+                async with asyncio.timeout(spec.timeout):
                     result = await bound_step.call()
             status_code = _extract_status_code(result)
             success = status_code is None or status_code < 400
@@ -202,10 +143,18 @@ class WorkerVURuntime:
             )
         finally:
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 3)
-            if spec.every_s is not None:
-                next_allowed_at[spec.step_name] = time.monotonic() + spec.every_s
-            else:
-                next_allowed_at[spec.step_name] = 0.0
+            try:
+                every_delay = resolve_every_delay(spec.every_s)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "invalid every_s for step, fallback to immediate scheduling "
+                    "(worker_id=%s, step=%s)",
+                    self._worker_id,
+                    spec.step_name,
+                    exc_info=True,
+                )
+                every_delay = 0.0
+            next_allowed_at[spec.step_name] = time.monotonic() + every_delay if every_delay > 0 else 0.0
             if not cancelled:
                 event = {
                     "ts_ms": int(time.time() * 1000),
@@ -261,9 +210,3 @@ def _extract_status_code(result: Any) -> int | None:
         return int(status)
     except (TypeError, ValueError):
         return None
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value

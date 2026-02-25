@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import inspect
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
+
+from vikhry.runtime.http import ReqwestClient, SupportsHTTP, close_http_client, resolve_http_client
+from vikhry.runtime.resources import SupportsResources
 
 _STEP_SPEC_ATTR = "__vikhry_step_spec__"
 _RESOURCE_SPEC_ATTR = "__vikhry_resource_spec__"
-
-
-class SupportsHTTP(Protocol):
-    async def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
-
-
-class SupportsResources(Protocol):
-    async def acquire(self, resource_name: str) -> dict[str, Any]: ...
-    async def release(self, resource_name: str, resource_id: int | str) -> None: ...
+EverySpec = float | Callable[[], float] | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -23,9 +19,9 @@ class StepSpec:
     method_name: str
     step_name: str
     weight: float
-    every_s: float | None
+    every_s: EverySpec
     requires: tuple[str, ...]
-    timeout_s: float | None
+    timeout: float | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,18 +37,24 @@ class BoundStep:
 
 
 class VU:
+    http = ReqwestClient()
+
     def __init__(
         self,
         *,
         user_id: str,
         worker_id: str,
-        http: SupportsHTTP,
         resources: SupportsResources,
+        http_base_url: str = "",
     ) -> None:
         self.user_id = user_id
         self.worker_id = worker_id
-        self.http = http
         self.resources = resources
+        self._http_base_url = http_base_url
+        self._http_client: SupportsHTTP | None = None
+
+    async def on_init(self, **_kwargs: Any) -> None:
+        self.ensure_http_client()
 
     async def on_start(self) -> None:
         return None
@@ -60,21 +62,34 @@ class VU:
     async def on_stop(self) -> None:
         return None
 
+    async def close(self) -> None:
+        await close_http_client(self._http_client)
+
+    def ensure_http_client(self) -> SupportsHTTP:
+        if self._http_client is not None:
+            return self._http_client
+
+        class_http_spec = getattr(type(self), "http", ReqwestClient())
+        client = resolve_http_client(class_http_spec, base_url=self._http_base_url)
+        self._http_client = client
+        self.http = client
+        return client
+
 
 def step(
     *,
     name: str | None = None,
     weight: float = 1.0,
-    every_s: float | None = None,
+    every_s: EverySpec = None,
     requires: tuple[str, ...] = (),
-    timeout_s: float | None = None,
+    timeout: float | None = None,
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     if weight <= 0:
         raise ValueError("step weight must be > 0")
-    if every_s is not None and every_s <= 0:
-        raise ValueError("step every_s must be > 0 when provided")
-    if timeout_s is not None and timeout_s <= 0:
-        raise ValueError("step timeout_s must be > 0 when provided")
+    if every_s is not None and not callable(every_s):
+        _validate_every_delay(float(every_s))
+    if timeout is not None and timeout <= 0:
+        raise ValueError("step timeout must be > 0 when provided")
 
     def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         if not inspect.iscoroutinefunction(func):
@@ -87,12 +102,26 @@ def step(
                 "weight": float(weight),
                 "every_s": every_s,
                 "requires": tuple(str(item) for item in requires),
-                "timeout_s": timeout_s,
+                "timeout": timeout,
             },
         )
         return func
 
     return decorator
+
+
+def between(min_s: float, max_s: float) -> Callable[[], float]:
+    min_value = float(min_s)
+    max_value = float(max_s)
+    if min_value <= 0:
+        raise ValueError("between min must be > 0")
+    if max_value < min_value:
+        raise ValueError("between max must be >= min")
+
+    def _next_delay() -> float:
+        return random.uniform(min_value, max_value)
+
+    return _next_delay
 
 
 def resource(*, name: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
@@ -138,7 +167,7 @@ def collect_vu_steps(vu_type: type[VU]) -> tuple[StepSpec, ...]:
                     weight=float(raw["weight"]),
                     every_s=raw["every_s"],
                     requires=tuple(raw["requires"]),
-                    timeout_s=raw["timeout_s"],
+                    timeout=raw["timeout"],
                 )
             )
 
@@ -171,3 +200,17 @@ def collect_resource_factories(namespace: dict[str, Any]) -> dict[str, Callable[
             raise ValueError(f"duplicate resource factory for name={resource_name}")
         factories[resource_name] = value
     return factories
+
+
+def resolve_every_delay(every_s: EverySpec) -> float:
+    if every_s is None:
+        return 0.0
+    if callable(every_s):
+        return _validate_every_delay(float(every_s()))
+    return _validate_every_delay(float(every_s))
+
+
+def _validate_every_delay(value: float) -> float:
+    if value <= 0:
+        raise ValueError("every_s must resolve to value > 0")
+    return value

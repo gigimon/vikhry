@@ -11,7 +11,7 @@
 - управление пользователями через `start/change-users/stop`;
 - персональные команды worker через Redis Pub/Sub;
 - worker heartbeat (`worker:{worker_id}:status`);
-- исполнение `VU`-сценариев в worker (`@step`, weighted выбор, `requires`, `every_s`, `timeout_s`);
+- исполнение `VU`-сценариев в worker (`@step`, weighted выбор, `requires`, `every_s`, `timeout`);
 - HTTP вызовы в VU через `pyreqwest`;
 - публикация событий нагрузки из worker в `metric:{metric_id}` streams;
 - CLI для orchestrator, worker и test-команд;
@@ -31,6 +31,7 @@ uv run vikhry orchestrator start --scenario /path/to/scenario.py
 uv run vikhry worker start --redis-url redis://127.0.0.1:6379/0
 uv run vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://api.example.com
 uv run vikhry test start --users 100 --orchestrator-url http://127.0.0.1:8080
+uv run vikhry test start --users 100 --init-param tenant=demo --init-param warmup=3
 uv run vikhry test change-users --users 150 --orchestrator-url http://127.0.0.1:8080
 uv run vikhry test stop --orchestrator-url http://127.0.0.1:8080
 uv run vikhry worker stop
@@ -69,4 +70,7 @@ uv run pytest -q
 uv run pytest -m integration tests/integration -q
 ```
 
-На текущем состоянии: `37 passed` (`uv run pytest -q`).
+UI может получить параметры `VU.on_init` через `GET /scenario/on_init_params`,
+а затем передать их в `POST /start_test` как `init_params`.
+
+На текущем состоянии: `45 passed` (`uv run pytest -q`).

@@ -18,6 +18,7 @@ class StartTestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_users: int = Field(ge=0)
+    init_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class StopTestPayload(BaseModel):
@@ -85,4 +86,3 @@ class CommandEnvelope(BaseModel):
         if not isinstance(parsed, dict):
             raise TypeError("Command envelope payload must be a JSON object")
         return cls.model_validate(parsed)
-

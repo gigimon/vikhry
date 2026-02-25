@@ -44,6 +44,7 @@ def register_routes(
     worker_presence: WorkerPresenceService,
     resource_service: ResourceService,
     metrics_service: MetricsService,
+    scenario_on_init_spec: dict[str, object],
 ) -> None:
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -101,11 +102,20 @@ def register_routes(
             payload = _parse_json_object(request)
             if "users" in payload and "target_users" not in payload:
                 payload["target_users"] = payload.pop("users")
+            if "params" in payload and "init_params" not in payload:
+                payload["init_params"] = payload.pop("params")
             model = StartTestRequest.model_validate(payload)
-            result = await lifecycle_service.start_test(model.target_users)
+            result = await lifecycle_service.start_test(
+                model.target_users,
+                model.init_params,
+            )
             return asdict(result)
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)
+
+    @app.get("/scenario/on_init_params")
+    async def scenario_on_init_params() -> dict[str, object]:
+        return dict(scenario_on_init_spec)
 
     @app.post("/change_users")
     async def change_users(request: Request) -> dict[str, object] | Response:

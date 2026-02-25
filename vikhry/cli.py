@@ -394,9 +394,26 @@ def worker_stop(
 def test_start(
     users: Annotated[int, typer.Option("--users", "-u", min=0)],
     orchestrator_url: Annotated[str, typer.Option("--orchestrator-url")] = DEFAULT_ORCHESTRATOR_URL,
+    init_param: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--init-param",
+            help="Init param in key=value form. Value can be JSON literal.",
+        ),
+    ] = None,
+    init_params_json: Annotated[
+        str | None,
+        typer.Option(
+            "--init-params-json",
+            help="JSON object with on_init params.",
+        ),
+    ] = None,
     timeout_s: Annotated[float, typer.Option("--timeout-s", min=0.1)] = 10.0,
 ) -> None:
     payload = {"target_users": users}
+    parsed_init_params = _parse_init_params(init_param or [], init_params_json)
+    if parsed_init_params:
+        payload["init_params"] = parsed_init_params
     _call_orchestrator_json(
         method="post",
         base_url=orchestrator_url,
@@ -871,6 +888,56 @@ def _extract_error_message(payload: dict[str, Any] | None) -> str | None:
         if isinstance(message, str) and message:
             return message
     return None
+
+
+def _parse_init_params(
+    key_value_items: list[str],
+    json_payload: str | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+
+    if json_payload:
+        try:
+            parsed = orjson.loads(json_payload)
+        except Exception as exc:  # noqa: BLE001
+            raise typer.Exit(
+                code=_error(f"Invalid `--init-params-json`: {exc}")
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise typer.Exit(
+                code=_error("`--init-params-json` must be a JSON object.")
+            )
+        result.update({str(key): value for key, value in parsed.items()})
+
+    for raw_item in key_value_items:
+        item = raw_item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise typer.Exit(
+                code=_error(
+                    f"Invalid `--init-param` value `{raw_item}`. Use key=value format."
+                )
+            )
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise typer.Exit(
+                code=_error("`--init-param` key must not be empty.")
+            )
+        value = _parse_init_param_value(raw_value.strip())
+        result[key] = value
+
+    return result
+
+
+def _parse_init_param_value(raw_value: str) -> Any:
+    if raw_value == "":
+        return ""
+    try:
+        return orjson.loads(raw_value)
+    except Exception:
+        return raw_value
 
 
 def _error(message: str) -> int:

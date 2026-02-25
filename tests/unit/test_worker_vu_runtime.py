@@ -55,6 +55,17 @@ class _MetricsVU(VU):
         await asyncio.sleep(0)
 
 
+class _InitParamsVU(VU):
+    seen: list[tuple[str, int]] = []
+
+    async def on_init(self, tenant: str, warmup: int = 1) -> None:
+        self.__class__.seen.append((tenant, int(warmup)))
+
+    @step(every_s=0.01)
+    async def ping(self) -> None:
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     _MetricsVU.started.clear()
@@ -93,3 +104,24 @@ def test_load_vu_type_resolves_valid_path_spec() -> None:
 def test_load_vu_type_rejects_invalid_path_spec() -> None:
     with pytest.raises(ValueError, match="module.path:ClassName"):
         load_vu_type("invalid-path")
+
+
+@pytest.mark.asyncio
+async def test_runtime_passes_init_params_to_on_init_spec() -> None:
+    _InitParamsVU.seen.clear()
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_InitParamsVU,
+        idle_sleep_s=0.01,
+    )
+
+    task = asyncio.create_task(
+        runtime.run_user("user-1", {"tenant": "acme", "warmup": 2})
+    )
+    await _wait_until(lambda: len(repo.metric_events) >= 1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert _InitParamsVU.seen == [("acme", 2)]

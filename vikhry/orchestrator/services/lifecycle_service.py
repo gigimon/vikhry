@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from vikhry.orchestrator.models.test_state import TestState
 from vikhry.orchestrator.models.user import UserRuntimeStatus
@@ -28,6 +29,7 @@ class InvalidStateTransitionError(RuntimeError):
 class StartTestResult:
     epoch: int
     target_users: int
+    init_params: dict[str, Any]
     prepare_result: dict[str, object]
     add_result: dict[str, object]
     start_result: dict[str, object]
@@ -74,9 +76,14 @@ class LifecycleService:
             TestState.STOPPING,
         }
 
-    async def start_test(self, target_users: int) -> StartTestResult:
+    async def start_test(
+        self,
+        target_users: int,
+        init_params: dict[str, Any] | None = None,
+    ) -> StartTestResult:
         if target_users < 0:
             raise ValueError("target_users must be >= 0")
+        resolved_init_params = dict(init_params or {})
 
         epoch = await self._state_repo.start_preparing_and_bump_epoch()
         if epoch is None:
@@ -89,7 +96,11 @@ class LifecycleService:
 
         try:
             prepare_result = await self._prepare_resources(target_users)
-            start_result = await self._user_orchestration.send_start_test(epoch, target_users)
+            start_result = await self._user_orchestration.send_start_test(
+                epoch,
+                target_users,
+                resolved_init_params,
+            )
             user_ids = list(range(1, target_users + 1))
             add_result = await self._user_orchestration.add_users(user_ids, epoch)
             await self._state_repo.set_all_users_status(
@@ -100,6 +111,7 @@ class LifecycleService:
             return StartTestResult(
                 epoch=epoch,
                 target_users=target_users,
+                init_params=resolved_init_params,
                 prepare_result=prepare_result,
                 add_result=add_result,
                 start_result=start_result,

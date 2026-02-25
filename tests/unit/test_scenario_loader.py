@@ -6,6 +6,7 @@ import pytest
 
 from vikhry.orchestrator.scenario_loader import (
     ScenarioLoadError,
+    load_on_init_spec_from_scenario,
     load_resource_names_from_scenario,
 )
 
@@ -53,3 +54,35 @@ async def fn():
 
     assert load_resource_names_from_scenario(scenario) == []
 
+
+def test_scenario_loader_extracts_on_init_spec_spec(tmp_path: Path) -> None:
+    scenario = tmp_path / "scenario.py"
+    scenario.write_text(
+        """
+from vikhry import VU
+
+class DemoVU(VU):
+    async def on_init(self, tenant: str, warmup: int = 1, *, mode: str = "safe", **kwargs):
+        pass
+""".strip(),
+        encoding="utf-8",
+    )
+
+    spec = load_on_init_spec_from_scenario(scenario)
+    assert spec["configured"] is True
+    assert spec["vu_class"] == "DemoVU"
+    assert spec["accepts_arbitrary_kwargs"] is True
+    params = spec["params"]
+    assert isinstance(params, list)
+    assert params[0]["name"] == "tenant"
+    assert params[0]["required"] is True
+    assert params[1]["name"] == "warmup"
+    assert params[1]["default"] == 1
+    assert params[2]["name"] == "mode"
+    assert params[2]["kind"] == "keyword_only"
+
+
+def test_scenario_loader_returns_empty_on_init_spec_without_scenario_spec() -> None:
+    spec = load_on_init_spec_from_scenario(None)
+    assert spec["configured"] is False
+    assert spec["params"] == []

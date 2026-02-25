@@ -29,7 +29,7 @@ class WorkerCommandDispatcher:
         runtime_state: WorkerRuntimeState,
         poll_timeout_s: float = 1.0,
         graceful_stop_timeout_s: float = 5.0,
-        user_task_factory: Callable[[str], Awaitable[None]] | None = None,
+        user_task_factory: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._worker_id = worker_id
@@ -151,6 +151,7 @@ class WorkerCommandDispatcher:
             state.assigned_users.clear()
             state.current_epoch = command.epoch
 
+        state.init_params = dict(payload.init_params)
         await self._start_test_stub(payload.target_users)
         state.phase = WorkerPhase.RUNNING
         logger.info(
@@ -174,6 +175,7 @@ class WorkerCommandDispatcher:
         state.phase = WorkerPhase.STOPPING
         await self._stop_all_user_tasks()
         state.assigned_users.clear()
+        state.init_params.clear()
         state.phase = WorkerPhase.IDLE
         logger.info("accepted stop_test (worker_id=%s, epoch=%s)", self._worker_id, state.current_epoch)
 
@@ -260,7 +262,7 @@ class WorkerCommandDispatcher:
     def _spawn_user_task(self, user_id: str) -> asyncio.Task[None] | None:
         if self._user_task_factory is None:
             return None
-        coroutine = self._user_task_factory(user_id)
+        coroutine = self._user_task_factory(user_id, dict(self._runtime_state.init_params))
         task = asyncio.create_task(
             coroutine,
             name=f"worker-vu:{self._worker_id}:{user_id}",
