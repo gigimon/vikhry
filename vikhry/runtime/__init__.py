@@ -11,10 +11,20 @@ from vikhry.runtime.dsl import (
     step,
 )
 from vikhry.runtime.http import ReqwestClient
+from vikhry.runtime.strategy import (
+    ParallelReadyStrategy,
+    SequentialWeightedStrategy,
+    StepSelection,
+    StepStrategy,
+)
 
 __all__ = [
     "VU",
+    "ParallelReadyStrategy",
     "ReqwestClient",
+    "SequentialWeightedStrategy",
+    "StepSelection",
+    "StepStrategy",
     "between",
     "bind_steps",
     "collect_resource_factories",

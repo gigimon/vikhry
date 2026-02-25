@@ -40,7 +40,14 @@ class _ExampleVU(VU):
     async def first(self) -> None:
         return None
 
-    @step(name="second_step", every_s=1.5, requires=("first",), timeout=2.0)
+    @step(
+        name="second_step",
+        every_s=1.5,
+        requires=("first",),
+        timeout=2.0,
+        lane="pages",
+        priority=7,
+    )
     async def second(self) -> None:
         return None
 
@@ -62,9 +69,11 @@ def test_collect_vu_steps_exposes_step_metadata_spec() -> None:
     steps = collect_vu_steps(_ExampleVU)
     assert [item.step_name for item in steps] == ["first", "second_step"]
     assert steps[0].weight == 2.0
+    assert steps[0].strategy_kwargs == {}
     assert steps[1].every_s == 1.5
     assert steps[1].requires == ("first",)
     assert steps[1].timeout == 2.0
+    assert steps[1].strategy_kwargs == {"lane": "pages", "priority": 7}
 
 
 def test_bind_steps_returns_bound_coroutines_spec() -> None:

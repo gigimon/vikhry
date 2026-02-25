@@ -8,6 +8,7 @@ from typing import Any
 
 from vikhry.runtime.http import ReqwestClient, SupportsHTTP, close_http_client, resolve_http_client
 from vikhry.runtime.resources import SupportsResources
+from vikhry.runtime.strategy import SequentialWeightedStrategy, StepStrategy
 
 _STEP_SPEC_ATTR = "__vikhry_step_spec__"
 _RESOURCE_SPEC_ATTR = "__vikhry_resource_spec__"
@@ -22,6 +23,7 @@ class StepSpec:
     every_s: EverySpec
     requires: tuple[str, ...]
     timeout: float | None
+    strategy_kwargs: dict[str, Any]
 
 
 @dataclass(slots=True, frozen=True)
@@ -38,6 +40,7 @@ class BoundStep:
 
 class VU:
     http = ReqwestClient()
+    step_strategy: StepStrategy[BoundStep] = SequentialWeightedStrategy()
 
     def __init__(
         self,
@@ -83,6 +86,7 @@ def step(
     every_s: EverySpec = None,
     requires: tuple[str, ...] = (),
     timeout: float | None = None,
+    **strategy_kwargs: Any,
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     if weight <= 0:
         raise ValueError("step weight must be > 0")
@@ -103,6 +107,7 @@ def step(
                 "every_s": every_s,
                 "requires": tuple(str(item) for item in requires),
                 "timeout": timeout,
+                "strategy_kwargs": dict(strategy_kwargs),
             },
         )
         return func
@@ -168,6 +173,7 @@ def collect_vu_steps(vu_type: type[VU]) -> tuple[StepSpec, ...]:
                     every_s=raw["every_s"],
                     requires=tuple(raw["requires"]),
                     timeout=raw["timeout"],
+                    strategy_kwargs=dict(raw.get("strategy_kwargs") or {}),
                 )
             )
 

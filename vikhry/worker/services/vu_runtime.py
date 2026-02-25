@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from vikhry.runtime import VU, bind_steps, resolve_every_delay
+from vikhry.runtime.strategy import SequentialWeightedStrategy, StepStrategy
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
 from vikhry.worker.services.resources import WorkerVUResources
 
@@ -53,6 +54,7 @@ class WorkerVURuntime:
         next_allowed_at: dict[str, float] = {}
         rng = random.Random(f"{self._worker_id}:{user_id}")
         steps = bind_steps(vu)
+        step_strategy = _resolve_step_strategy(vu.step_strategy)
 
         try:
             if init_kwargs:
@@ -63,36 +65,42 @@ class WorkerVURuntime:
             await vu.on_start()
             while True:
                 now = time.monotonic()
-                eligible = []
-                nearest_ready_at: float | None = None
-
-                for bound_step in steps:
-                    spec = bound_step.spec
-                    if any(required not in completed_steps for required in spec.requires):
-                        continue
-                    ready_at = next_allowed_at.get(spec.step_name, 0.0)
-                    if ready_at <= now:
-                        eligible.append(bound_step)
-                    elif nearest_ready_at is None or ready_at < nearest_ready_at:
-                        nearest_ready_at = ready_at
-
-                if not eligible:
-                    if nearest_ready_at is None:
-                        await asyncio.sleep(self._idle_sleep_s)
-                    else:
-                        await asyncio.sleep(max(self._idle_sleep_s, nearest_ready_at - now))
-                    continue
-
-                chosen = rng.choices(
-                    eligible,
-                    weights=[item.spec.weight for item in eligible],
-                    k=1,
-                )[0]
-                await self._execute_step(
-                    user_id=user_id,
+                selection = step_strategy.select(
+                    steps=steps,
                     completed_steps=completed_steps,
                     next_allowed_at=next_allowed_at,
-                    bound_step=chosen,
+                    now=now,
+                    rng=rng,
+                )
+
+                if not selection.steps:
+                    if selection.nearest_ready_at is None:
+                        await asyncio.sleep(self._idle_sleep_s)
+                    else:
+                        await asyncio.sleep(
+                            max(self._idle_sleep_s, selection.nearest_ready_at - now)
+                        )
+                    continue
+
+                if len(selection.steps) == 1:
+                    await self._execute_step(
+                        user_id=user_id,
+                        completed_steps=completed_steps,
+                        next_allowed_at=next_allowed_at,
+                        bound_step=selection.steps[0],
+                    )
+                    continue
+
+                await asyncio.gather(
+                    *(
+                        self._execute_step(
+                            user_id=user_id,
+                            completed_steps=completed_steps,
+                            next_allowed_at=next_allowed_at,
+                            bound_step=bound_step,
+                        )
+                        for bound_step in selection.steps
+                    )
                 )
         except asyncio.CancelledError:
             raise
@@ -178,6 +186,16 @@ class WorkerVURuntime:
                 self._worker_id,
                 self._metric_id,
             )
+
+
+def _resolve_step_strategy(candidate: object) -> StepStrategy[Any]:
+    if candidate is None:
+        return SequentialWeightedStrategy()
+    if isinstance(candidate, type):
+        candidate = candidate()
+    if not isinstance(candidate, StepStrategy):
+        raise TypeError("VU step_strategy must implement select(...)")
+    return candidate
 
 
 def load_vu_type(import_path: str) -> type[VU]:

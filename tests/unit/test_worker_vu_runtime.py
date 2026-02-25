@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from vikhry.runtime import VU, step
+from vikhry.runtime.strategy import StepSelection
 from vikhry.worker.services.vu_runtime import WorkerVURuntime, load_vu_type
 
 
@@ -63,6 +64,34 @@ class _InitParamsVU(VU):
 
     @step(every_s=0.01)
     async def ping(self) -> None:
+        await asyncio.sleep(0)
+
+
+class _OnlyFirstStrategy:
+    def select(
+        self,
+        *,
+        steps: tuple[Any, ...],
+        completed_steps: set[str],
+        next_allowed_at: dict[str, float],
+        now: float,
+        rng: Any,
+    ) -> StepSelection[Any]:
+        _ = (completed_steps, next_allowed_at, now, rng)
+        if not steps:
+            return StepSelection(steps=(), nearest_ready_at=None)
+        return StepSelection(steps=(steps[0],), nearest_ready_at=None)
+
+
+class _CustomStrategyVU(VU):
+    step_strategy = _OnlyFirstStrategy
+
+    @step(name="first", every_s=0.01)
+    async def first(self) -> None:
+        await asyncio.sleep(0)
+
+    @step(name="second", every_s=0.01)
+    async def second(self) -> None:
         await asyncio.sleep(0)
 
 
@@ -125,3 +154,21 @@ async def test_runtime_passes_init_params_to_on_init_spec() -> None:
     await asyncio.gather(task, return_exceptions=True)
 
     assert _InitParamsVU.seen == [("acme", 2)]
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_custom_step_strategy_from_vu_spec() -> None:
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_CustomStrategyVU,
+        idle_sleep_s=0.01,
+    )
+
+    task = asyncio.create_task(runtime.run_user("user-1"))
+    await _wait_until(lambda: len(repo.metric_events) >= 3)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert all(event["step"] == "first" for _, event in repo.metric_events)
