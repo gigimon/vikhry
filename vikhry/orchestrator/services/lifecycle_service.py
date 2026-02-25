@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+
+from vikhry.orchestrator.models.test_state import TestState
+from vikhry.orchestrator.models.user import UserRuntimeStatus
+from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
+from vikhry.orchestrator.services.resource_service import ResourceService
+from vikhry.orchestrator.services.user_orchestration import UserOrchestrationService
+
+
+class InvalidStateTransitionError(RuntimeError):
+    def __init__(self, action: str, expected: tuple[TestState, ...], current: TestState) -> None:
+        expected_repr = ", ".join(state.value for state in expected)
+        super().__init__(
+            f"Action `{action}` is allowed only for [{expected_repr}], current={current.value}"
+        )
+        self.action = action
+        self.expected = expected
+        self.current = current
+
+
+@dataclass(slots=True, frozen=True)
+class StartTestResult:
+    epoch: int
+    target_users: int
+    prepare_result: dict[str, object]
+    add_result: dict[str, object]
+    start_result: dict[str, object]
+
+
+@dataclass(slots=True, frozen=True)
+class ChangeUsersResult:
+    epoch: int
+    target_users: int
+    current_users: int
+    action: str
+    result: dict[str, object]
+
+
+@dataclass(slots=True, frozen=True)
+class StopTestResult:
+    epoch: int
+    stop_result: dict[str, object]
+
+
+class LifecycleService:
+    """Strict lifecycle manager (fail-fast) for orchestrator v1."""
+
+    def __init__(
+        self,
+        state_repo: TestStateRepository,
+        user_orchestration: UserOrchestrationService,
+        resource_service: ResourceService,
+    ) -> None:
+        self._state_repo = state_repo
+        self._user_orchestration = user_orchestration
+        self._resource_service = resource_service
+
+    async def state_snapshot(self) -> dict[str, str | int]:
+        state = await self._state_repo.get_state()
+        epoch = await self._state_repo.get_epoch()
+        return {"state": state.value, "epoch": epoch}
+
+    async def is_ready(self) -> bool:
+        return (await self._state_repo.get_state()) in {
+            TestState.IDLE,
+            TestState.PREPARING,
+            TestState.RUNNING,
+            TestState.STOPPING,
+        }
+
+    async def start_test(self, target_users: int) -> StartTestResult:
+        if target_users < 0:
+            raise ValueError("target_users must be >= 0")
+
+        epoch = await self._state_repo.start_preparing_and_bump_epoch()
+        if epoch is None:
+            current = await self._state_repo.get_state()
+            raise InvalidStateTransitionError(
+                action="start_test",
+                expected=(TestState.IDLE,),
+                current=current,
+            )
+
+        try:
+            prepare_result = await self._prepare_resources(target_users)
+            user_ids = list(range(1, target_users + 1))
+            add_result = await self._user_orchestration.add_users(user_ids, epoch)
+            start_result = await self._user_orchestration.send_start_test(epoch, target_users)
+            await self._state_repo.set_all_users_status(
+                status=UserRuntimeStatus.RUNNING,
+                updated_at=self._now_ts(),
+            )
+            await self._state_repo.set_state(TestState.RUNNING)
+            return StartTestResult(
+                epoch=epoch,
+                target_users=target_users,
+                prepare_result=prepare_result,
+                add_result=add_result,
+                start_result=start_result,
+            )
+        except Exception:  # noqa: BLE001
+            # Rollback to stable state for v1 if start sequence failed.
+            await self._state_repo.clear_users_data()
+            await self._state_repo.set_state(TestState.IDLE)
+            raise
+
+    async def change_users(self, target_users: int) -> ChangeUsersResult:
+        if target_users < 0:
+            raise ValueError("target_users must be >= 0")
+
+        state = await self._state_repo.get_state()
+        if state != TestState.RUNNING:
+            raise InvalidStateTransitionError(
+                action="change_users",
+                expected=(TestState.RUNNING,),
+                current=state,
+            )
+
+        epoch = await self._state_repo.get_epoch()
+        current_user_ids = await self._state_repo.list_users()
+        current_users = len(current_user_ids)
+
+        if target_users == current_users:
+            return ChangeUsersResult(
+                epoch=epoch,
+                target_users=target_users,
+                current_users=current_users,
+                action="noop",
+                result={"requested": 0},
+            )
+
+        if target_users > current_users:
+            user_ids = self._new_user_ids(
+                existing_user_ids=current_user_ids,
+                count=target_users - current_users,
+            )
+            add_result = await self._user_orchestration.add_users(user_ids, epoch)
+            return ChangeUsersResult(
+                epoch=epoch,
+                target_users=target_users,
+                current_users=current_users,
+                action="add",
+                result=add_result,
+            )
+
+        users_to_remove = self._users_for_removal(
+            existing_user_ids=current_user_ids,
+            count=current_users - target_users,
+        )
+        remove_result = await self._user_orchestration.remove_users(users_to_remove, epoch)
+        return ChangeUsersResult(
+            epoch=epoch,
+            target_users=target_users,
+            current_users=current_users,
+            action="remove",
+            result=remove_result,
+        )
+
+    async def stop_test(self) -> StopTestResult:
+        current = await self._state_repo.get_state()
+        expected = (TestState.PREPARING, TestState.RUNNING)
+        if current not in expected:
+            raise InvalidStateTransitionError(
+                action="stop_test",
+                expected=expected,
+                current=current,
+            )
+
+        changed = await self._state_repo.compare_and_set_state(current, TestState.STOPPING)
+        if not changed:
+            latest = await self._state_repo.get_state()
+            raise InvalidStateTransitionError(
+                action="stop_test",
+                expected=expected,
+                current=latest,
+            )
+
+        epoch = await self._state_repo.get_epoch()
+        stop_result = await self._user_orchestration.send_stop_test(epoch)
+        await self._state_repo.clear_users_data()
+        await self._state_repo.set_state(TestState.IDLE)
+        return StopTestResult(epoch=epoch, stop_result=stop_result)
+
+    async def _prepare_resources(self, target_users: int) -> dict[str, object]:
+        return await self._resource_service.prepare_for_start(target_users)
+
+    @staticmethod
+    def _new_user_ids(existing_user_ids: list[str], count: int) -> list[int]:
+        max_user_id = 0
+        for user_id in existing_user_ids:
+            if user_id.isdigit():
+                max_user_id = max(max_user_id, int(user_id))
+        return [max_user_id + offset for offset in range(1, count + 1)]
+
+    @staticmethod
+    def _users_for_removal(existing_user_ids: list[str], count: int) -> list[str]:
+        def sort_key(user_id: str) -> tuple[int, int | str]:
+            return (0, int(user_id)) if user_id.isdigit() else (1, user_id)
+
+        ordered = sorted(existing_user_ids, key=sort_key, reverse=True)
+        return ordered[:count]
+
+    @staticmethod
+    def _now_ts() -> int:
+        return int(time.time())

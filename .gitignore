@@ -12,3 +12,5 @@ frontend/dist/
 
 # Local env
 .venv/
+.vikhry-orchestrator.log
+.vikhry-orchestrator.pid
