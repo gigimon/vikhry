@@ -87,6 +87,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
 
     register_routes(
         app=app,
+        state_repo=state_repo,
         lifecycle_service=lifecycle_service,
         worker_presence=worker_presence,
         resource_service=resource_service,

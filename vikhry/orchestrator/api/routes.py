@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import asdict
 from typing import Any
 
@@ -11,6 +12,8 @@ from vikhry.orchestrator.models.resource import (
     CreateResourceRequest,
     EnsureResourceCountRequest,
 )
+from vikhry.orchestrator.models.worker import WorkerStatus
+from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
 from vikhry.orchestrator.services.lifecycle_service import (
     InvalidStateTransitionError,
     LifecycleService,
@@ -40,6 +43,7 @@ class ApiError(Exception):
 
 def register_routes(
     app: Robyn,
+    state_repo: TestStateRepository,
     lifecycle_service: LifecycleService,
     worker_presence: WorkerPresenceService,
     resource_service: ResourceService,
@@ -152,6 +156,20 @@ def register_routes(
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)
 
+    @app.get("/workers")
+    async def workers() -> dict[str, object] | Response:
+        try:
+            return await _build_workers_response(state_repo=state_repo, worker_presence=worker_presence)
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
+    @app.get("/resources")
+    async def resources() -> dict[str, object] | Response:
+        try:
+            return await _build_resources_response(state_repo=state_repo, now_ts=worker_presence.now_ts())
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
     @app.websocket("/ws/metrics")
     async def metrics_ws(websocket) -> None:
         subscriber_id, queue = await metrics_service.subscribe()
@@ -165,6 +183,77 @@ def register_routes(
             return None
         finally:
             await metrics_service.unsubscribe(subscriber_id)
+
+
+async def _build_workers_response(
+    state_repo: TestStateRepository,
+    worker_presence: WorkerPresenceService,
+) -> dict[str, object]:
+    worker_ids = await state_repo.list_workers()
+    now_ts = worker_presence.now_ts()
+    if not worker_ids:
+        return {
+            "generated_at": now_ts,
+            "count": 0,
+            "workers": [],
+        }
+
+    statuses, worker_users = await asyncio.gather(
+        asyncio.gather(*(state_repo.get_worker_status(worker_id) for worker_id in worker_ids)),
+        asyncio.gather(*(state_repo.list_worker_users(worker_id) for worker_id in worker_ids)),
+    )
+    return {
+        "generated_at": now_ts,
+        "count": len(worker_ids),
+        "workers": [
+            _worker_payload(
+                worker_id=worker_id,
+                status=status,
+                users_count=len(users),
+                now_ts=now_ts,
+            )
+            for worker_id, status, users in zip(worker_ids, statuses, worker_users, strict=True)
+        ],
+    }
+
+
+def _worker_payload(
+    *,
+    worker_id: str,
+    status: WorkerStatus | None,
+    users_count: int,
+    now_ts: int,
+) -> dict[str, object]:
+    status_value: str | None = None
+    last_heartbeat: int | None = None
+    heartbeat_age_s: int | None = None
+    if status is not None:
+        status_value = status.status.value
+        last_heartbeat = status.last_heartbeat
+        heartbeat_age_s = max(0, now_ts - status.last_heartbeat)
+    return {
+        "worker_id": worker_id,
+        "status": status_value,
+        "last_heartbeat": last_heartbeat,
+        "heartbeat_age_s": heartbeat_age_s,
+        "users_count": users_count,
+    }
+
+
+async def _build_resources_response(
+    state_repo: TestStateRepository,
+    now_ts: int,
+) -> dict[str, object]:
+    counters = await state_repo.list_resource_counters()
+    resources = [
+        {"resource_name": resource_name, "count": count}
+        for resource_name, count in sorted(counters.items())
+    ]
+    return {
+        "generated_at": now_ts,
+        "count": len(resources),
+        "resources": resources,
+    }
 
 
 def _json_response(status: int, payload: dict[str, object]) -> Response:

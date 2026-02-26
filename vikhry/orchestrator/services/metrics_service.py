@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ class _MetricBucket:
     errors: int = 0
     latency_sum_ms: float = 0.0
     latency_samples: int = 0
+    latencies_ms: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -193,6 +195,7 @@ class MetricsService:
         if latency_ms is not None:
             bucket.latency_sum_ms += latency_ms
             bucket.latency_samples += 1
+            bucket.latencies_ms.append(latency_ms)
 
         self._trim_buckets(state, current_second=second)
 
@@ -210,19 +213,15 @@ class MetricsService:
 
     def _aggregate(self, state: _MetricState) -> dict[str, object]:
         if not state.buckets:
-            return {
-                "window_s": self._window_s,
-                "requests": 0,
-                "errors": 0,
-                "error_rate": 0.0,
-                "rps": 0.0,
-                "latency_avg_ms": None,
-            }
+            return self._empty_aggregate()
 
         requests = sum(bucket.requests for bucket in state.buckets)
         errors = sum(bucket.errors for bucket in state.buckets)
         latency_sum_ms = sum(bucket.latency_sum_ms for bucket in state.buckets)
         latency_samples = sum(bucket.latency_samples for bucket in state.buckets)
+        latencies_ms = sorted(
+            latency for bucket in state.buckets for latency in bucket.latencies_ms
+        )
 
         return {
             "window_s": self._window_s,
@@ -233,6 +232,9 @@ class MetricsService:
             "latency_avg_ms": (latency_sum_ms / latency_samples)
             if latency_samples
             else None,
+            "latency_median_ms": _sorted_median(latencies_ms),
+            "latency_p95_ms": _sorted_percentile_nearest_rank(latencies_ms, percentile=95),
+            "latency_p99_ms": _sorted_percentile_nearest_rank(latencies_ms, percentile=99),
         }
 
     def _build_snapshot_locked(
@@ -251,14 +253,7 @@ class MetricsService:
                     {
                         "metric_id": current_metric_id,
                         "last_event_id": None,
-                        "aggregate": {
-                            "window_s": self._window_s,
-                            "requests": 0,
-                            "errors": 0,
-                            "error_rate": 0.0,
-                            "rps": 0.0,
-                            "latency_avg_ms": None,
-                        },
+                        "aggregate": self._empty_aggregate(),
                         "events": [] if include_events else None,
                     }
                 )
@@ -290,6 +285,19 @@ class MetricsService:
             "metrics": metrics_payload,
             "count": count,
             "include_events": include_events,
+        }
+
+    def _empty_aggregate(self) -> dict[str, object]:
+        return {
+            "window_s": self._window_s,
+            "requests": 0,
+            "errors": 0,
+            "error_rate": 0.0,
+            "rps": 0.0,
+            "latency_avg_ms": None,
+            "latency_median_ms": None,
+            "latency_p95_ms": None,
+            "latency_p99_ms": None,
         }
 
     def _fanout_locked(self, payload: dict[str, object]) -> None:
@@ -329,6 +337,33 @@ def _extract_event_ts_ms(event_id: str, payload: dict[str, Any]) -> int:
         return parsed_head
 
     return int(time.time() * 1000)
+
+
+def _sorted_median(sorted_values: list[float]) -> float | None:
+    if not sorted_values:
+        return None
+    size = len(sorted_values)
+    middle = size // 2
+    if size % 2:
+        return sorted_values[middle]
+    return (sorted_values[middle - 1] + sorted_values[middle]) / 2.0
+
+
+def _sorted_percentile_nearest_rank(
+    sorted_values: list[float],
+    *,
+    percentile: int,
+) -> float | None:
+    if not sorted_values:
+        return None
+    if percentile <= 0:
+        return sorted_values[0]
+    if percentile >= 100:
+        return sorted_values[-1]
+
+    rank = math.ceil((percentile / 100) * len(sorted_values))
+    index = max(0, min(rank - 1, len(sorted_values) - 1))
+    return sorted_values[index]
 
 
 def _extract_latency_ms(payload: dict[str, Any]) -> float | None:

@@ -180,16 +180,16 @@
 # UI v1 Implementation
 
 ## Step 19: API-контракты для UI
-[ ] Добавить `GET /workers` с полями `worker_id`, `status`, `last_heartbeat`, `heartbeat_age_s`, `users_count`.
-[ ] Добавить `GET /resources` с полями `resource_name`, `count`.
-[ ] Зафиксировать и задокументировать JSON-контракты новых endpoints в `docs/contracts/v1.md`.
-[ ] Добавить unit/integration тесты для `/workers` и `/resources`.
+[x] Добавить `GET /workers` с полями `worker_id`, `status`, `last_heartbeat`, `heartbeat_age_s`, `users_count`.
+[x] Добавить `GET /resources` с полями `resource_name`, `count`.
+[x] Зафиксировать и задокументировать JSON-контракты новых endpoints в `docs/contracts/v1.md`.
+[x] Добавить unit/integration тесты для `/workers` и `/resources`.
 
 ## Step 20: Расширение метрик (exact percentiles)
-[ ] Обновить `MetricsService` для расчета `latency_median_ms`, `latency_p95_ms`, `latency_p99_ms` в окне `window_s`.
-[ ] Добавить новые поля в `aggregate` ответа `/metrics` и payload `metrics_snapshot`/`metrics_tick`.
-[ ] Сохранить backward compatibility по текущим полям (`requests`, `errors`, `error_rate`, `rps`, `latency_avg_ms`).
-[ ] Покрыть тестами корректность расчетов перцентилей (четное/нечетное число sample, пустое окно).
+[x] Обновить `MetricsService` для расчета `latency_median_ms`, `latency_p95_ms`, `latency_p99_ms` в окне `window_s`.
+[x] Добавить новые поля в `aggregate` ответа `/metrics` и payload `metrics_snapshot`/`metrics_tick`.
+[x] Сохранить backward compatibility по текущим полям (`requests`, `errors`, `error_rate`, `rps`, `latency_avg_ms`).
+[x] Покрыть тестами корректность расчетов перцентилей (четное/нечетное число sample, пустое окно).
 
 ## Step 21: Каркас frontend приложения
 [ ] Создать директорию `frontend/` и инициализировать Vite React TypeScript проект.
