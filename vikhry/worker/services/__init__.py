@@ -2,6 +2,7 @@
 
 from vikhry.worker.services.command_dispatcher import WorkerCommandDispatcher
 from vikhry.worker.services.heartbeat import WorkerHeartbeatService
+from vikhry.worker.services.metrics import WorkerMetricsPublisher
 from vikhry.worker.services.resources import WorkerVUResources
 from vikhry.worker.services.vu_runtime import (
     DEFAULT_SCENARIO_IMPORT,
@@ -12,6 +13,7 @@ from vikhry.worker.services.vu_runtime import (
 __all__ = [
     "WorkerCommandDispatcher",
     "WorkerHeartbeatService",
+    "WorkerMetricsPublisher",
     "WorkerVUResources",
     "WorkerVURuntime",
     "load_vu_type",

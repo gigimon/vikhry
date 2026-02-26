@@ -11,6 +11,7 @@ from vikhry.runtime.dsl import (
     step,
 )
 from vikhry.runtime.http import ReqwestClient
+from vikhry.runtime.metrics import emit_metric, metric
 from vikhry.runtime.strategy import (
     ParallelReadyStrategy,
     SequentialWeightedStrategy,
@@ -25,6 +26,8 @@ __all__ = [
     "SequentialWeightedStrategy",
     "StepSelection",
     "StepStrategy",
+    "emit_metric",
+    "metric",
     "between",
     "bind_steps",
     "collect_resource_factories",

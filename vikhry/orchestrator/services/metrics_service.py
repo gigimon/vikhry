@@ -313,7 +313,7 @@ def _extract_event_ts_ms(event_id: str, payload: dict[str, Any]) -> int:
         if parsed is not None:
             return parsed
 
-    for key in ("timestamp", "ts", "time"):
+    for key in ("timestamp", "ts"):
         value = payload.get(key)
         parsed = _to_float(value)
         if parsed is None:
@@ -332,7 +332,7 @@ def _extract_event_ts_ms(event_id: str, payload: dict[str, Any]) -> int:
 
 
 def _extract_latency_ms(payload: dict[str, Any]) -> float | None:
-    for key in ("latency_ms", "duration_ms", "latency", "duration"):
+    for key in ("time", "latency_ms", "duration_ms", "latency", "duration"):
         parsed = _to_float(payload.get(key))
         if parsed is not None and parsed >= 0:
             return parsed
@@ -340,6 +340,16 @@ def _extract_latency_ms(payload: dict[str, Any]) -> float | None:
 
 
 def _is_error_event(payload: dict[str, Any]) -> bool:
+    status = payload.get("status")
+    if isinstance(status, bool):
+        return not status
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"ok", "success", "true", "1"}:
+            return False
+        if normalized in {"error", "failed", "false", "0"}:
+            return True
+
     status_code = _to_int(payload.get("status_code"))
     if status_code is not None:
         return status_code >= 400

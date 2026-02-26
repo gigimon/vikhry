@@ -155,3 +155,80 @@
 [x] Integration tests с Redis: регистрация heartbeat, обработка команд, graceful stop.
 [x] E2E smoke: orchestrator + worker + CLI (`start/change-users/stop`) без падений и рассинхрона.
 [x] Обновить README и `docs/3_worker.md` под реализованный MVP и ограничения (без DSL runtime).
+
+# UI v1 Description
+
+Цель: реализовать production-ready web UI для управления тестом и live-наблюдения метрик с учетом ограничений v1.
+
+Зафиксированные решения:
+- frontend как отдельное React + TypeScript + Vite приложение;
+- маршрутизация через React Router с отдельными route на вкладки (`/stats`, `/charts`, `/resources`, `/workers`);
+- `react-query` используется для server-state, `MobX` — для UI/runtime состояния и live-сессии;
+- live-данные приходят push-only через `ws /ws/metrics` (HTTP только для bootstrap и non-live endpoints);
+- перцентили (`median`, `p95`, `p99`) считаются в orchestrator;
+- расчет перцентилей exact (по всем latency sample в окне агрегации);
+- orchestrator расширяется новыми API для UI: `/workers`, `/resources`.
+
+Технологический стек:
+- React + TypeScript + Vite
+- React Router
+- DaisyUI
+- @tanstack/react-query
+- MobX / mobx-react-lite
+- Recharts
+
+# UI v1 Implementation
+
+## Step 19: API-контракты для UI
+[ ] Добавить `GET /workers` с полями `worker_id`, `status`, `last_heartbeat`, `heartbeat_age_s`, `users_count`.
+[ ] Добавить `GET /resources` с полями `resource_name`, `count`.
+[ ] Зафиксировать и задокументировать JSON-контракты новых endpoints в `docs/contracts/v1.md`.
+[ ] Добавить unit/integration тесты для `/workers` и `/resources`.
+
+## Step 20: Расширение метрик (exact percentiles)
+[ ] Обновить `MetricsService` для расчета `latency_median_ms`, `latency_p95_ms`, `latency_p99_ms` в окне `window_s`.
+[ ] Добавить новые поля в `aggregate` ответа `/metrics` и payload `metrics_snapshot`/`metrics_tick`.
+[ ] Сохранить backward compatibility по текущим полям (`requests`, `errors`, `error_rate`, `rps`, `latency_avg_ms`).
+[ ] Покрыть тестами корректность расчетов перцентилей (четное/нечетное число sample, пустое окно).
+
+## Step 21: Каркас frontend приложения
+[ ] Создать директорию `frontend/` и инициализировать Vite React TypeScript проект.
+[ ] Подключить DaisyUI и базовый дизайн-токены слой (цвета, типографика, spacing).
+[ ] Настроить React Router с layout и route-страницами: `stats`, `charts`, `resources`, `workers`.
+[ ] Добавить конфиг окружения для API base URL и WebSocket URL.
+
+## Step 22: Data layer и live-сессия
+[ ] Реализовать API client для orchestrator endpoints (`/ready`, `/start_test`, `/stop_test`, `/change_users`, `/scenario/on_init_params`, `/metrics`, `/workers`, `/resources`, `/create_resource`, `/ensure_resource`).
+[ ] Настроить `react-query` для REST-запросов и инвалидаций после mutation.
+[ ] Реализовать MobX store для WebSocket live-сессии (`connect`, `reconnect`, `backoff`, `last_tick_at`, `is_live`).
+[ ] Реализовать merge live-payload в клиентские модели для таблиц и графиков без polling.
+
+## Step 23: Header и управление запуском теста
+[ ] Собрать верхнюю control-панель: `state`, `epoch`, `alive_workers`, lag/backlog indicators.
+[ ] Реализовать Start/Stop/Change Users действия с обработкой API ошибок.
+[ ] Построить динамическую форму `init_params` на основе `/scenario/on_init_params`.
+[ ] Добавить guard'ы UI по state machine (`start` только из `IDLE`, `change_users` только в `RUNNING`).
+
+## Step 24: Вкладка Stats
+[ ] Реализовать таблицу метрик с группировкой по `metric_id`.
+[ ] Показать `requests`, `errors`, `error_rate`, `rps`, `latency_avg_ms`, `latency_median_ms`, `latency_p95_ms`, `latency_p99_ms`.
+[ ] Добавить выбор видимых колонок и сохранить пользовательский выбор (local storage).
+[ ] Добавить сортировку и фильтрацию по имени метрики.
+
+## Step 25: Вкладка Charts
+[ ] Реализовать ring-buffer временных рядов на клиенте (интервалы 5m/15m/30m/1h).
+[ ] Построить графики Recharts для `rps`, `latency`, `errors/error_rate`.
+[ ] Добавить выбор отображаемых метрик и серий.
+[ ] Добавить обработку деградации live-потока (stale banner/indicator).
+
+## Step 26: Вкладки Resources и Workers
+[ ] Resources: список ресурсов (`name`, `count`) + модальное окно create/ensure count.
+[ ] Workers: таблица worker'ов со статусом, возрастом heartbeat и числом назначенных users.
+[ ] Добавить действия refresh/retry и состояния empty/error/loading.
+[ ] Синхронизировать данные вкладок после mutation операций.
+
+## Step 27: Тестирование, документация, стабилизация
+[ ] Добавить frontend unit tests для store/formatters и базовых UI-сценариев.
+[ ] Добавить integration тесты orchestrator для расширенного контракта метрик и новых endpoints.
+[ ] Обновить `README.md` и `docs/5_ui.md` по фактической архитектуре и UX-flow.
+[ ] Добавить smoke-checklist запуска UI вместе с orchestrator/worker.

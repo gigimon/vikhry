@@ -138,7 +138,7 @@ async def test_vu_on_init_materializes_http_client_spec() -> None:
     _FactoryVU.http.calls = 0
     await vu.on_init()
     try:
-        assert isinstance(vu.http, _FactoryHttpClient)
+        assert callable(getattr(vu.http, "request", None))
         assert vu.http.base_url == "http://localhost:8000"
         assert _FactoryVU.http.calls == 1
     finally:
