@@ -55,17 +55,31 @@ def register_routes(
         return {"status": "ok"}
 
     @app.get("/ready")
-    async def ready() -> dict[str, str | bool | int]:
+    async def ready() -> dict[str, object]:
         snapshot = await lifecycle_service.state_snapshot()
         alive_workers = worker_presence.cached_alive_workers()
         if not alive_workers and worker_presence.last_scan_ts() is None:
             alive_workers = await worker_presence.refresh_cache()
+        now_ts = worker_presence.now_ts()
+        alive_statuses = (
+            await asyncio.gather(*(state_repo.get_worker_status(worker_id) for worker_id in alive_workers))
+            if alive_workers
+            else []
+        )
         return {
             "ready": await lifecycle_service.is_ready(),
             "state": snapshot["state"],
             "epoch": snapshot["epoch"],
             "alive_workers": len(alive_workers),
             "workers": alive_workers,
+            "workers_status": [
+                _ready_worker_payload(
+                    worker_id=worker_id,
+                    status=status,
+                    now_ts=now_ts,
+                )
+                for worker_id, status in zip(alive_workers, alive_statuses, strict=True)
+            ],
         }
 
     @app.post("/create_resource")
@@ -227,17 +241,42 @@ def _worker_payload(
     status_value: str | None = None
     last_heartbeat: int | None = None
     heartbeat_age_s: int | None = None
+    cpu_percent: float | None = None
+    rss_bytes: int | None = None
+    memory_percent: float | None = None
     if status is not None:
         status_value = status.status.value
         last_heartbeat = status.last_heartbeat
         heartbeat_age_s = max(0, now_ts - status.last_heartbeat)
+        cpu_percent = status.cpu_percent
+        rss_bytes = status.rss_bytes
+        memory_percent = status.memory_percent
     return {
         "worker_id": worker_id,
         "status": status_value,
         "last_heartbeat": last_heartbeat,
         "heartbeat_age_s": heartbeat_age_s,
         "users_count": users_count,
+        "cpu_percent": cpu_percent,
+        "rss_bytes": rss_bytes,
+        "memory_percent": memory_percent,
     }
+
+
+def _ready_worker_payload(
+    *,
+    worker_id: str,
+    status: WorkerStatus | None,
+    now_ts: int,
+) -> dict[str, object]:
+    payload = _worker_payload(
+        worker_id=worker_id,
+        status=status,
+        users_count=0,
+        now_ts=now_ts,
+    )
+    payload.pop("users_count", None)
+    return payload
 
 
 async def _build_resources_response(

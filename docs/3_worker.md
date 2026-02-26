@@ -33,6 +33,9 @@ Worker обновляет hash:
 - поля:
   - `status`: `healthy | unhealthy`
   - `last_heartbeat`: unix timestamp
+  - `cpu_percent`: загрузка процесса worker (проценты)
+  - `rss_bytes`: потребление памяти процесса worker (RSS, bytes)
+  - `memory_percent`: доля RSS от системной памяти (проценты)
 
 На graceful shutdown worker делает best-effort `status=unhealthy`, затем unregister.
 

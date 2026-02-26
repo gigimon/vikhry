@@ -15,4 +15,6 @@ class WorkerStatus(BaseModel):
 
     status: WorkerHealthStatus
     last_heartbeat: int = Field(ge=0)
-
+    cpu_percent: float | None = Field(default=None, ge=0)
+    rss_bytes: int | None = Field(default=None, ge=0)
+    memory_percent: float | None = Field(default=None, ge=0)

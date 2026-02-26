@@ -63,6 +63,9 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": 95,
             "heartbeat_age_s": 5,
             "users_count": 2,
+            "cpu_percent": None,
+            "rss_bytes": None,
+            "memory_percent": None,
         },
         {
             "worker_id": "w2",
@@ -70,6 +73,9 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": None,
             "heartbeat_age_s": None,
             "users_count": 0,
+            "cpu_percent": None,
+            "rss_bytes": None,
+            "memory_percent": None,
         },
         {
             "worker_id": "w3",
@@ -77,6 +83,9 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": 50,
             "heartbeat_age_s": 50,
             "users_count": 1,
+            "cpu_percent": None,
+            "rss_bytes": None,
+            "memory_percent": None,
         },
     ]
 

@@ -58,13 +58,23 @@ class WorkerStateRepository:
         *,
         status: WorkerHealthStatus,
         last_heartbeat: int,
+        cpu_percent: float | None = None,
+        rss_bytes: int | None = None,
+        memory_percent: float | None = None,
     ) -> None:
+        mapping: dict[str, str] = {
+            "status": status.value,
+            "last_heartbeat": str(last_heartbeat),
+        }
+        if cpu_percent is not None:
+            mapping["cpu_percent"] = f"{cpu_percent:.2f}"
+        if rss_bytes is not None:
+            mapping["rss_bytes"] = str(rss_bytes)
+        if memory_percent is not None:
+            mapping["memory_percent"] = f"{memory_percent:.4f}"
         await self._redis.hset(
             self.worker_status_key(worker_id),
-            mapping={
-                "status": status.value,
-                "last_heartbeat": str(last_heartbeat),
-            },
+            mapping=mapping,
         )
 
     async def subscribe_commands(self, worker_id: str) -> PubSub:
