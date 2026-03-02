@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -107,6 +108,48 @@ class _ManualMetricVU(VU):
         await asyncio.sleep(0)
 
 
+class _Status500Response:
+    status = 500
+
+
+class _StatusFailVU(VU):
+    @step(every_s=0.01)
+    async def ping(self) -> _Status500Response:
+        await asyncio.sleep(0)
+        return _Status500Response()
+
+
+class _ExceptionFailVU(VU):
+    @step(every_s=0.01)
+    async def ping(self) -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+
+class _InitFailVU(VU):
+    step_calls = 0
+
+    async def on_init(self, **_kwargs: Any) -> None:
+        raise RuntimeError("init boom")
+
+    @step(every_s=0.01)
+    async def ping(self) -> None:
+        self.__class__.step_calls += 1
+        await asyncio.sleep(0)
+
+
+class _StartFailVU(VU):
+    step_calls = 0
+
+    async def on_start(self) -> None:
+        raise RuntimeError("start boom")
+
+    @step(every_s=0.01)
+    async def ping(self) -> None:
+        self.__class__.step_calls += 1
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     _MetricsVU.started.clear()
@@ -128,7 +171,7 @@ async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     assert "user-1" in _MetricsVU.stopped
     assert repo.acquired_resource_names == ["users"]
     assert repo.released_resources == [("users", "42")]
-    assert all(metric_id == "worker:w1" for metric_id, _ in repo.metric_events)
+    assert all(metric_id == "ping" for metric_id, _ in repo.metric_events)
     first_event = repo.metric_events[0][1]
     assert first_event["worker_id"] == "w1"
     assert first_event["user_id"] == "user-1"
@@ -209,7 +252,89 @@ async def test_runtime_supports_manual_and_decorator_metrics_spec() -> None:
     await asyncio.gather(task, return_exceptions=True)
 
     by_name = {event["name"]: event for _, event in repo.metric_events}
+    assert {metric_id for metric_id, _ in repo.metric_events} >= {"ping", "helper_prepare", "/auth"}
+    assert all(metric_id == event["name"] for metric_id, event in repo.metric_events)
     assert by_name["/auth"]["step"] == "ping"
     assert by_name["/auth"]["status"] is True
     assert by_name["/auth"]["method"] == "POST"
     assert by_name["helper_prepare"]["component"] == "auth"
+
+
+@pytest.mark.asyncio
+async def test_runtime_ignores_step_result_status_like_field_spec(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_StatusFailVU,
+        idle_sleep_s=0.01,
+    )
+
+    task = asyncio.create_task(runtime.run_user("user-1"))
+    await _wait_until(lambda: len(repo.metric_events) >= 1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    first_event = repo.metric_events[0][1]
+    assert first_event["name"] == "ping"
+    assert first_event["status"] is True
+    assert "error" not in first_event
+    assert not any("returned error status" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_runtime_logs_error_for_step_exception_spec(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.ERROR)
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_ExceptionFailVU,
+        idle_sleep_s=0.01,
+    )
+
+    task = asyncio.create_task(runtime.run_user("user-1"))
+    await _wait_until(lambda: len(repo.metric_events) >= 1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert any("raised exception" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_run_steps_when_on_init_fails_spec() -> None:
+    _InitFailVU.step_calls = 0
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_InitFailVU,
+        idle_sleep_s=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="init boom"):
+        await runtime.run_user("user-1")
+
+    assert _InitFailVU.step_calls == 0
+    assert repo.metric_events == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_run_steps_when_on_start_fails_spec() -> None:
+    _StartFailVU.step_calls = 0
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_StartFailVU,
+        idle_sleep_s=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="start boom"):
+        await runtime.run_user("user-1")
+
+    assert _StartFailVU.step_calls == 0
+    assert repo.metric_events == []

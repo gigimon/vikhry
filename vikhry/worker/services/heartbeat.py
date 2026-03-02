@@ -70,6 +70,7 @@ class WorkerHeartbeatService:
             cpu_percent=sample.cpu_percent,
             rss_bytes=sample.rss_bytes,
             memory_percent=sample.memory_percent,
+            total_ram_bytes=sample.total_ram_bytes,
         )
 
 
@@ -78,6 +79,7 @@ class RuntimeSample:
     cpu_percent: float
     rss_bytes: int
     memory_percent: float | None
+    total_ram_bytes: int | None
 
 
 class _RuntimeStatsSampler:
@@ -113,6 +115,7 @@ class _RuntimeStatsSampler:
             cpu_percent=cpu_percent,
             rss_bytes=rss_bytes,
             memory_percent=memory_percent,
+            total_ram_bytes=self._total_memory_bytes,
         )
 
 

@@ -29,6 +29,11 @@ class _MetricState:
     last_event_id: str | None = None
     buckets: deque[_MetricBucket] = field(default_factory=deque)
     recent_events: deque[dict[str, Any]] = field(default_factory=deque)
+    total_requests: int = 0
+    total_errors: int = 0
+    total_latency_sum_ms: float = 0.0
+    total_latency_samples: int = 0
+    total_latencies_ms: list[float] = field(default_factory=list)
 
 
 class MetricsService:
@@ -53,6 +58,7 @@ class MetricsService:
         self._subscribers: dict[str, asyncio.Queue[dict[str, object]]] = {}
         self._metrics_with_backlog: set[str] = set()
         self._dropped_subscriber_messages = 0
+        self._run_started_at_ms: int | None = None
 
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -95,7 +101,16 @@ class MetricsService:
         include_events: bool = True,
     ) -> dict[str, object]:
         capped_count = max(0, min(count, self._max_recent_events_per_metric))
-        known_metric_ids = await self._state_repo.list_metrics() if metric_id is None else [metric_id]
+        if metric_id is None:
+            try:
+                known_metric_ids = await self._state_repo.list_metrics()
+            except Exception:  # noqa: BLE001
+                # Degrade gracefully for API consumers if Redis metrics index is unavailable
+                # or has incompatible type from legacy data.
+                logger.exception("failed to list metrics from state repo; returning cached snapshot")
+                known_metric_ids = []
+        else:
+            known_metric_ids = [metric_id]
         async with self._lock:
             for known_metric_id in known_metric_ids:
                 self._state_for(known_metric_id)
@@ -107,6 +122,15 @@ class MetricsService:
 
     async def refresh_now(self) -> None:
         await self._poll_once()
+
+    async def reset_for_new_run(self) -> None:
+        deleted_keys = await self._state_repo.clear_metrics_data()
+        async with self._lock:
+            self._metrics.clear()
+            self._metrics_with_backlog.clear()
+            self._dropped_subscriber_messages = 0
+            self._run_started_at_ms = None
+        logger.info("metrics reset for new run deleted_keys=%s", deleted_keys)
 
     async def _run_loop(self) -> None:
         while True:
@@ -185,17 +209,24 @@ class MetricsService:
 
         ts_ms = _extract_event_ts_ms(event_id, data)
         second = ts_ms // 1000
+        if self._run_started_at_ms is None:
+            self._run_started_at_ms = ts_ms
 
         bucket = self._ensure_bucket(state, second)
         bucket.requests += 1
+        state.total_requests += 1
         if _is_error_event(data):
             bucket.errors += 1
+            state.total_errors += 1
 
         latency_ms = _extract_latency_ms(data)
         if latency_ms is not None:
             bucket.latency_sum_ms += latency_ms
             bucket.latency_samples += 1
             bucket.latencies_ms.append(latency_ms)
+            state.total_latency_sum_ms += latency_ms
+            state.total_latency_samples += 1
+            state.total_latencies_ms.append(latency_ms)
 
         self._trim_buckets(state, current_second=second)
 
@@ -237,12 +268,33 @@ class MetricsService:
             "latency_p99_ms": _sorted_percentile_nearest_rank(latencies_ms, percentile=99),
         }
 
+    def _aggregate_total(self, state: _MetricState, now_ms: int) -> dict[str, object]:
+        elapsed_s = _elapsed_total_window_s(now_ms=now_ms, started_at_ms=self._run_started_at_ms)
+        total_latencies_ms = sorted(state.total_latencies_ms)
+
+        return {
+            "window_s": elapsed_s,
+            "requests": state.total_requests,
+            "errors": state.total_errors,
+            "error_rate": (state.total_errors / state.total_requests)
+            if state.total_requests
+            else 0.0,
+            "rps": (state.total_requests / elapsed_s) if elapsed_s > 0 else 0.0,
+            "latency_avg_ms": (state.total_latency_sum_ms / state.total_latency_samples)
+            if state.total_latency_samples
+            else None,
+            "latency_median_ms": _sorted_median(total_latencies_ms),
+            "latency_p95_ms": _sorted_percentile_nearest_rank(total_latencies_ms, percentile=95),
+            "latency_p99_ms": _sorted_percentile_nearest_rank(total_latencies_ms, percentile=99),
+        }
+
     def _build_snapshot_locked(
         self,
         metric_id: str | None,
         count: int,
         include_events: bool,
     ) -> dict[str, object]:
+        now_ms = int(time.time() * 1000)
         metric_ids = [metric_id] if metric_id else sorted(self._metrics.keys())
         metrics_payload: list[dict[str, object]] = []
 
@@ -254,6 +306,12 @@ class MetricsService:
                         "metric_id": current_metric_id,
                         "last_event_id": None,
                         "aggregate": self._empty_aggregate(),
+                        "aggregate_total": self._empty_aggregate(
+                            window_s=_elapsed_total_window_s(
+                                now_ms=now_ms,
+                                started_at_ms=self._run_started_at_ms,
+                            )
+                        ),
                         "events": [] if include_events else None,
                     }
                 )
@@ -271,12 +329,13 @@ class MetricsService:
                     "metric_id": current_metric_id,
                     "last_event_id": state.last_event_id,
                     "aggregate": self._aggregate(state),
+                    "aggregate_total": self._aggregate_total(state, now_ms),
                     "events": events_payload,
                 }
             )
 
         return {
-            "generated_at": int(time.time()),
+            "generated_at": int(now_ms / 1000),
             "lag": {
                 "detected": bool(self._metrics_with_backlog),
                 "metrics_with_backlog": sorted(self._metrics_with_backlog),
@@ -287,9 +346,9 @@ class MetricsService:
             "include_events": include_events,
         }
 
-    def _empty_aggregate(self) -> dict[str, object]:
+    def _empty_aggregate(self, *, window_s: int | None = None) -> dict[str, object]:
         return {
-            "window_s": self._window_s,
+            "window_s": self._window_s if window_s is None else max(1, int(window_s)),
             "requests": 0,
             "errors": 0,
             "error_rate": 0.0,
@@ -337,6 +396,12 @@ def _extract_event_ts_ms(event_id: str, payload: dict[str, Any]) -> int:
         return parsed_head
 
     return int(time.time() * 1000)
+
+
+def _elapsed_total_window_s(*, now_ms: int, started_at_ms: int | None) -> int:
+    if started_at_ms is None:
+        return 1
+    return max(1, int((now_ms - started_at_ms) / 1000))
 
 
 def _sorted_median(sorted_values: list[float]) -> float | None:

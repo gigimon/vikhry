@@ -110,6 +110,27 @@ async def test_lifecycle_happy_path_spec() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_start_calls_before_start_hook_spec() -> None:
+    repo = _FakeStateRepo()
+    user_orchestration = _FakeUserOrchestration(repo)
+    hook_calls: list[str] = []
+
+    async def before_start_hook() -> None:
+        hook_calls.append("called")
+
+    service = LifecycleService(
+        state_repo=repo,  # type: ignore[arg-type]
+        user_orchestration=user_orchestration,  # type: ignore[arg-type]
+        resource_service=_FakeResourceService(),  # type: ignore[arg-type]
+        on_before_start_test=before_start_hook,
+    )
+
+    await service.start_test(target_users=1)
+
+    assert hook_calls == ["called"]
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_start_rolls_back_on_failure_spec() -> None:
     repo = _FakeStateRepo()
     user_orchestration = _FakeUserOrchestration(repo)

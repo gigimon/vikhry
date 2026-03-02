@@ -249,6 +249,23 @@ class TestStateRepository:
         metrics = await self._redis.smembers("metrics")
         return sorted(str(metric) for metric in metrics)
 
+    async def clear_metrics_data(self) -> int:
+        keys_to_delete: list[str] = ["metrics"]
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(
+                cursor=cursor,
+                match="metric:*",
+                count=500,
+            )
+            if keys:
+                keys_to_delete.extend(str(key) for key in keys)
+            if cursor == 0:
+                break
+        if not keys_to_delete:
+            return 0
+        return int(await self._redis.delete(*keys_to_delete))
+
     async def append_metric_event(self, metric_id: str, event: dict[str, Any]) -> str:
         await self.register_metric(metric_id)
         event_id = await self._redis.xadd(

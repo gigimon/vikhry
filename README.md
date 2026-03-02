@@ -27,7 +27,7 @@
 
 ```bash
 uv run vikhry orchestrator start --host 127.0.0.1 --port 8080 --redis-url redis://127.0.0.1:6379/0
-uv run vikhry orchestrator start --scenario /path/to/scenario.py
+uv run vikhry orchestrator start --scenario my_load.scenarios:MyVU
 uv run vikhry worker start --redis-url redis://127.0.0.1:6379/0
 uv run vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://api.example.com
 uv run vikhry test start --users 100 --orchestrator-url http://127.0.0.1:8080
@@ -40,7 +40,8 @@ uv run vikhry orchestrator stop
 
 По умолчанию `orchestrator start` и `worker start` запускают процесс в фоне (detach) и освобождают терминал.
 Для запуска в текущем терминале используйте `--foreground`.
-Опция `orchestrator --scenario /path/to/scenario.py` читает `@resource(...)` декларации из файла сценария.
+Опция `orchestrator --scenario module.path:ClassName` использует тот же формат, что и worker.
+Orchestrator извлекает ресурсы и `on_init`-параметры из этого импортируемого сценария.
 В фазе `PREPARING` orchestrator создает недостающие ресурсы под `target_users` (on-demand).
 По умолчанию `pid` и `log` сохраняются в системный runtime-каталог:
 - macOS: `~/Library/Caches/vikhry/`

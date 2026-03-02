@@ -61,6 +61,7 @@ class WorkerStateRepository:
         cpu_percent: float | None = None,
         rss_bytes: int | None = None,
         memory_percent: float | None = None,
+        total_ram_bytes: int | None = None,
     ) -> None:
         mapping: dict[str, str] = {
             "status": status.value,
@@ -72,6 +73,8 @@ class WorkerStateRepository:
             mapping["rss_bytes"] = str(rss_bytes)
         if memory_percent is not None:
             mapping["memory_percent"] = f"{memory_percent:.4f}"
+        if total_ram_bytes is not None:
+            mapping["total_ram_bytes"] = str(total_ram_bytes)
         await self._redis.hset(
             self.worker_status_key(worker_id),
             mapping=mapping,

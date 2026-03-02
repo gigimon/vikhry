@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class WorkerSettings:
     redis_url: str = "redis://127.0.0.1:6379/0"
     worker_id: str = ""
+    log_level: str = "INFO"
     heartbeat_interval_s: float = 3.0
     command_poll_timeout_s: float = 1.0
     graceful_stop_timeout_s: float = 5.0

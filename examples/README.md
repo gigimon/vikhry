@@ -21,3 +21,11 @@ Run worker with this scenario:
 uv run vikhry worker start \
   --scenario examples.scenarios.localhost_demo:LocalhostDemoVU
 ```
+
+`base_url` is required by `LocalhostDemoVU.on_init`, so pass it when starting test:
+
+```bash
+uv run vikhry test start \
+  --users 10 \
+  --init-param base_url=http://localhost:8000
+```

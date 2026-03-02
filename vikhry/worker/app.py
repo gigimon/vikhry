@@ -95,7 +95,7 @@ async def run_worker_async(settings: WorkerSettings) -> None:
 
 
 def run_worker(settings: WorkerSettings) -> None:
-    _configure_logging()
+    _configure_logging(settings.log_level)
     uvloop.install()
     asyncio.run(run_worker_async(settings))
 
@@ -109,11 +109,18 @@ def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
             continue
 
 
-def _configure_logging() -> None:
+def _configure_logging(log_level: str) -> None:
     root = logging.getLogger()
     if root.handlers:
         return
+    normalized_level = str(log_level).strip().upper() or "INFO"
+    resolved_level = getattr(logging, normalized_level, None)
+    invalid_level = not isinstance(resolved_level, int)
+    if not isinstance(resolved_level, int):
+        resolved_level = logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=resolved_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if invalid_level:
+        logger.warning("unknown log level `%s`, falling back to INFO", log_level)

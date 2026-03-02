@@ -21,6 +21,7 @@ class _FakeWorkerStateRepo:
         cpu_percent: float | None = None,
         rss_bytes: int | None = None,
         memory_percent: float | None = None,
+        total_ram_bytes: int | None = None,
     ) -> None:
         self.calls.append(
             {
@@ -30,6 +31,7 @@ class _FakeWorkerStateRepo:
                 "cpu_percent": cpu_percent,
                 "rss_bytes": rss_bytes,
                 "memory_percent": memory_percent,
+                "total_ram_bytes": total_ram_bytes,
             }
         )
 
@@ -57,6 +59,7 @@ async def test_heartbeat_mark_healthy_unhealthy_spec() -> None:
     assert all(isinstance(call["cpu_percent"], float) for call in repo.calls)
     assert all(isinstance(call["rss_bytes"], int) for call in repo.calls)
     assert all(call["memory_percent"] is None or isinstance(call["memory_percent"], float) for call in repo.calls)
+    assert all(call["total_ram_bytes"] is None or isinstance(call["total_ram_bytes"], int) for call in repo.calls)
 
 
 @pytest.mark.asyncio
@@ -84,3 +87,4 @@ async def test_heartbeat_loop_publishes_repeated_updates_spec() -> None:
     assert all(call["status"] is WorkerHealthStatus.HEALTHY for call in repo.calls)
     assert all(isinstance(call["cpu_percent"], float) for call in repo.calls)
     assert all(isinstance(call["rss_bytes"], int) for call in repo.calls)
+    assert all(call["total_ram_bytes"] is None or isinstance(call["total_ram_bytes"], int) for call in repo.calls)

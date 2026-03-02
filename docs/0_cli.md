@@ -36,6 +36,9 @@ Worker runtime-опции сценария:
 - `--http-base-url` — base URL для относительных HTTP шагов;
 - `--vu-idle-sleep-s` — idle sleep интервал VU loop.
 
+Orchestrator runtime-опция сценария:
+- `--scenario module.path:ClassName` — тот же формат импорта, что и у worker; используется для извлечения `@resource` и сигнатуры `VU.on_init`.
+
 ### Runtime файлы (`pid`, `log`)
 
 По умолчанию используются пути:

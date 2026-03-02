@@ -23,7 +23,7 @@ import {
 } from 'recharts'
 
 import {
-  API_BASE_URL,
+  changeUsers,
   createResource,
   fetchMetrics,
   fetchReady,
@@ -46,6 +46,7 @@ import type {
 const REFRESH_INTERVAL_MS = 2_000
 
 type TabId = 'statistics' | 'charts' | 'resources' | 'workers'
+type StatsScope = 'window' | 'total'
 type StatsColumnId =
   | 'name'
   | 'success'
@@ -57,12 +58,19 @@ type StatsColumnId =
   | 'rps'
   | 'failureRate'
 type LatencySeriesId = 'averageMs' | 'medianMs' | 'p95Ms' | 'p99Ms'
+type NotificationTone = 'info' | 'success' | 'error'
 
 interface ChartHistoryPoint {
   ts: number
   totalUsers: number
   rpsByMetric: Record<string, number>
   latencyByType: Record<LatencySeriesId, number | null>
+}
+
+interface NotificationItem {
+  id: number
+  tone: NotificationTone
+  message: string
 }
 
 const tabs: Array<{ id: TabId; label: string }> = [
@@ -86,6 +94,8 @@ const statsColumns: Array<{ id: StatsColumnId; label: string; required?: boolean
 
 const defaultVisibleColumns = statsColumns.map((column) => column.id)
 const HISTORY_WINDOW_S = 15 * 60
+const NOTIFICATION_TTL_MS = 4_500
+const ERROR_NOTIFICATION_TTL_MS = 7_000
 const rpsLinePalette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4']
 const latencySeriesMeta: Array<{ id: LatencySeriesId; label: string; color: string }> = [
   { id: 'averageMs', label: 'Average', color: '#8b5cf6' },
@@ -98,6 +108,11 @@ const numberFormatter = new Intl.NumberFormat('en-US')
 const compactNumberFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 1,
 })
+const gigabytesFormatter = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 1,
+})
+const BYTES_IN_MB = 1024 * 1024
+const BYTES_IN_GB = 1024 * 1024 * 1024
 
 function formatMaybeNumber(value: number | null, fractionDigits = 0): string {
   if (value === null || Number.isNaN(value)) {
@@ -122,16 +137,79 @@ function statusLabel(state: ReadyResponse['state'] | undefined): string {
   return 'Offline'
 }
 
-function toStatsRows(metrics: MetricsResponse | null): StatsRow[] {
+function statusToneClass(state: ReadyResponse['state'] | undefined): string {
+  if (state === 'RUNNING') {
+    return 'pill--state-running'
+  }
+  if (state === 'IDLE') {
+    return 'pill--state-idle'
+  }
+  if (state === undefined) {
+    return 'pill--state-offline'
+  }
+  return 'pill--state-idle'
+}
+
+function normalizedString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function metricSortByName(a: { name: string }, b: { name: string }): number {
+  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+}
+
+function latestMetricEventData(metric: MetricsResponse['metrics'][number]): Record<string, unknown> | null {
+  const latestEvent = metric.events && metric.events.length > 0 ? metric.events[metric.events.length - 1] : null
+  const rawData = latestEvent?.data
+  if (!rawData || typeof rawData !== 'object') {
+    return null
+  }
+  return rawData
+}
+
+function metricKind(metric: MetricsResponse['metrics'][number]): string | null {
+  const data = latestMetricEventData(metric)
+  return normalizedString(data?.kind) ?? null
+}
+
+function isHttpMetric(metric: MetricsResponse['metrics'][number]): boolean {
+  const kind = metricKind(metric)
+  if (kind === 'http') {
+    return true
+  }
+  if (kind === null) {
+    return metric.metric_id.startsWith('/')
+  }
+  return false
+}
+
+function toStatsRows(metrics: MetricsResponse | null, scope: StatsScope): StatsRow[] {
   if (!metrics) {
     return []
   }
 
-  return metrics.metrics.map((item) => {
-    const { aggregate } = item
+  type RowWithMeta = StatsRow & {
+    metricId: string
+    kind: string | null
+    stepName: string | null
+    isStepMetric: boolean
+  }
+
+  const rows: RowWithMeta[] = metrics.metrics.map((item) => {
+    const aggregate = scope === 'total' ? item.aggregate_total : item.aggregate
     const failure = aggregate.errors
     const success = Math.max(0, aggregate.requests - failure)
+    const eventData = latestMetricEventData(item)
+    const kind = metricKind(item)
+    const stepName = normalizedString(eventData?.step ?? null)
+    const isStepMetric = kind === 'step' && stepName !== null && item.metric_id === stepName
+
     return {
+      metricId: item.metric_id,
       name: item.metric_id,
       success,
       failure,
@@ -141,8 +219,61 @@ function toStatsRows(metrics: MetricsResponse | null): StatsRow[] {
       averageMs: aggregate.latency_avg_ms,
       rps: aggregate.rps,
       failureRate: aggregate.error_rate,
+      kind,
+      stepName,
+      isStepMetric,
     }
   })
+
+  const topLevelRows: RowWithMeta[] = []
+  const stepRowsByName = new Map<string, RowWithMeta>()
+  const httpRowsByStep = new Map<string, RowWithMeta[]>()
+
+  for (const row of rows) {
+    if (row.isStepMetric) {
+      stepRowsByName.set(row.metricId, row)
+      continue
+    }
+
+    if (row.kind === 'http' && row.stepName !== null && row.stepName !== '__unknown__') {
+      const grouped = httpRowsByStep.get(row.stepName) ?? []
+      grouped.push(row)
+      httpRowsByStep.set(row.stepName, grouped)
+      continue
+    }
+
+    topLevelRows.push(row)
+  }
+
+  for (const stepRow of stepRowsByName.values()) {
+    topLevelRows.push(stepRow)
+  }
+
+  for (const [stepName, childRows] of httpRowsByStep.entries()) {
+    if (stepRowsByName.has(stepName)) {
+      continue
+    }
+    topLevelRows.push(...childRows)
+  }
+
+  topLevelRows.sort(metricSortByName)
+
+  const output: StatsRow[] = []
+  for (const row of topLevelRows) {
+    output.push({ ...row, isNested: false })
+
+    if (!row.isStepMetric) {
+      continue
+    }
+
+    const children = [...(httpRowsByStep.get(row.metricId) ?? [])]
+    children.sort(metricSortByName)
+    for (const child of children) {
+      output.push({ ...child, isNested: true })
+    }
+  }
+
+  return output
 }
 
 function formatChartTime(ts: number): string {
@@ -251,6 +382,23 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value))
 }
 
+function formatRamUsage(processRamBytes: number | null, totalRamBytes: number | null): string | null {
+  if (processRamBytes === null && totalRamBytes === null) {
+    return null
+  }
+
+  const processLabel =
+    processRamBytes === null
+      ? '—'
+      : `${numberFormatter.format(Math.round(processRamBytes / BYTES_IN_MB))} Mb`
+  const totalLabel =
+    totalRamBytes === null
+      ? '—'
+      : `${gigabytesFormatter.format(totalRamBytes / BYTES_IN_GB)} Gb`
+
+  return `${processLabel} / ${totalLabel}`
+}
+
 function loadTone(value: number | null): 'ok' | 'warn' | 'critical' {
   if (value === null) {
     return 'ok'
@@ -313,6 +461,7 @@ function useDashboardData() {
     if (readyResult.status === 'fulfilled') {
       setReady(readyResult.value)
     } else {
+      setReady(null)
       pushError('ready', readyResult.reason)
     }
 
@@ -384,20 +533,23 @@ function useDashboardData() {
 
 export function LoadTestingScreen() {
   const [activeTab, setActiveTab] = useState<TabId>('statistics')
+  const [statsScope, setStatsScope] = useState<StatsScope>('window')
   const [visibleColumns, setVisibleColumns] = useState<StatsColumnId[]>(defaultVisibleColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
 
   const [startModalOpen, setStartModalOpen] = useState(false)
+  const [changeUsersModalOpen, setChangeUsersModalOpen] = useState(false)
   const [resourceModalOpen, setResourceModalOpen] = useState(false)
 
   const [stopping, setStopping] = useState(false)
   const [starting, setStarting] = useState(false)
+  const [changingUsers, setChangingUsers] = useState(false)
   const [creatingResource, setCreatingResource] = useState(false)
 
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [actionMessage, setActionMessage] = useState<string | null>(null)
+  const [notifications, setNotifications] = useState<NotificationItem[]>([])
 
   const [targetUsersInput, setTargetUsersInput] = useState('1000')
+  const [changeUsersInput, setChangeUsersInput] = useState('0')
   const [resourceNameInput, setResourceNameInput] = useState('')
   const [resourceCountInput, setResourceCountInput] = useState('1')
   const [selectedRpsMetrics, setSelectedRpsMetrics] = useState<string[]>([])
@@ -417,6 +569,9 @@ export function LoadTestingScreen() {
   const [initParamValues, setInitParamValues] = useState<Record<string, string>>({})
 
   const columnsContainerRef = useRef<HTMLDivElement | null>(null)
+  const notificationIdRef = useRef(0)
+  const notificationTimersRef = useRef<Map<number, number>>(new Map())
+  const lastFetchErrorRef = useRef<string | null>(null)
 
   const {
     ready,
@@ -424,13 +579,41 @@ export function LoadTestingScreen() {
     resources,
     metrics,
     history,
-    loading,
     refreshing,
     error,
     refresh,
   } = useDashboardData()
 
-  const rows = useMemo(() => toStatsRows(metrics), [metrics])
+  const dismissNotification = useCallback((id: number) => {
+    const timerId = notificationTimersRef.current.get(id)
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId)
+      notificationTimersRef.current.delete(id)
+    }
+    setNotifications((current) => current.filter((item) => item.id !== id))
+  }, [])
+
+  const pushNotification = useCallback(
+    (tone: NotificationTone, message: string) => {
+      const normalizedMessage = message.trim()
+      if (!normalizedMessage) {
+        return
+      }
+
+      const id = notificationIdRef.current + 1
+      notificationIdRef.current = id
+      setNotifications((current) => [...current, { id, tone, message: normalizedMessage }].slice(-5))
+
+      const ttl = tone === 'error' ? ERROR_NOTIFICATION_TTL_MS : NOTIFICATION_TTL_MS
+      const timerId = window.setTimeout(() => {
+        dismissNotification(id)
+      }, ttl)
+      notificationTimersRef.current.set(id, timerId)
+    },
+    [dismissNotification],
+  )
+
+  const rows = useMemo(() => toStatsRows(metrics, statsScope), [metrics, statsScope])
 
   const totalUsers = useMemo(() => {
     if (!workers) {
@@ -443,7 +626,12 @@ export function LoadTestingScreen() {
     if (!metrics) {
       return 0
     }
-    return metrics.metrics.reduce((total, metric) => total + metric.aggregate.rps, 0)
+    return metrics.metrics.reduce((total, metric) => {
+      if (!isHttpMetric(metric)) {
+        return total
+      }
+      return total + metric.aggregate.rps
+    }, 0)
   }, [metrics])
 
   const workerRows = useMemo(() => {
@@ -453,6 +641,17 @@ export function LoadTestingScreen() {
 
     return workers.workers.map((worker) => {
       const badge = workerBadge(worker)
+      const processRamBytes =
+        typeof worker.process_ram_bytes === 'number' && Number.isFinite(worker.process_ram_bytes)
+          ? worker.process_ram_bytes
+          : typeof worker.rss_bytes === 'number' && Number.isFinite(worker.rss_bytes)
+            ? worker.rss_bytes
+            : null
+      const totalRamBytes =
+        typeof worker.total_ram_bytes === 'number' && Number.isFinite(worker.total_ram_bytes)
+          ? worker.total_ram_bytes
+          : null
+      const ramUsage = formatRamUsage(processRamBytes, totalRamBytes)
 
       const rawCpu = worker.cpu_percent ?? worker.cpu_load ?? null
       const cpuLoad =
@@ -460,7 +659,19 @@ export function LoadTestingScreen() {
           ? clampPercent(rawCpu)
           : null
 
-      const rawMemory = worker.memory_percent ?? worker.ram_load ?? null
+      const rawMemory = (() => {
+        if (typeof worker.memory_percent === 'number' && Number.isFinite(worker.memory_percent)) {
+          return worker.memory_percent
+        }
+        if (typeof worker.ram_load === 'number' && Number.isFinite(worker.ram_load)) {
+          return worker.ram_load
+        }
+
+        if (processRamBytes === null || totalRamBytes === null || totalRamBytes <= 0) {
+          return null
+        }
+        return (processRamBytes / totalRamBytes) * 100
+      })()
       const ramLoad =
         typeof rawMemory === 'number' && Number.isFinite(rawMemory)
           ? clampPercent(rawMemory)
@@ -471,6 +682,7 @@ export function LoadTestingScreen() {
         badge,
         cpuLoad,
         ramLoad,
+        ramUsage,
       }
     })
   }, [workers])
@@ -559,6 +771,7 @@ export function LoadTestingScreen() {
 
   const canStop = ready?.state === 'RUNNING' || ready?.state === 'PREPARING'
   const canStart = ready?.state === 'IDLE'
+  const canChangeUsers = ready?.state === 'RUNNING'
   const resourceNames = useMemo(
     () => (resources?.resources ?? []).map((resource) => resource.resource_name),
     [resources],
@@ -577,10 +790,13 @@ export function LoadTestingScreen() {
   }, [resources])
 
   const refreshData = useCallback(async () => {
-    setActionMessage(null)
-    setActionError(null)
     await refresh()
   }, [refresh])
+
+  const openChangeUsersModal = useCallback(() => {
+    setChangeUsersInput(String(totalUsers))
+    setChangeUsersModalOpen(true)
+  }, [totalUsers])
 
   const openResourceModal = useCallback(
     (resourceName?: string) => {
@@ -604,22 +820,20 @@ export function LoadTestingScreen() {
   const onStop = useCallback(async () => {
     try {
       setStopping(true)
-      setActionError(null)
-      setActionMessage(null)
       await stopTest()
-      setActionMessage('Stop command sent.')
+      pushNotification('success', 'Stop command sent.')
       await refresh()
     } catch (stopError) {
-      setActionError(stopError instanceof Error ? stopError.message : 'Failed to stop test')
+      pushNotification('error', stopError instanceof Error ? stopError.message : 'Failed to stop test')
     } finally {
       setStopping(false)
     }
-  }, [refresh])
+  }, [pushNotification, refresh])
 
   const onStart = useCallback(async () => {
     const targetUsers = Number(targetUsersInput)
     if (!Number.isInteger(targetUsers) || targetUsers < 0) {
-      setActionError('Users must be an integer >= 0.')
+      pushNotification('error', 'Users must be an integer >= 0.')
       return
     }
 
@@ -629,7 +843,7 @@ export function LoadTestingScreen() {
         const rawValue = initParamValues[param.name]?.trim() ?? ''
         if (rawValue.length === 0) {
           if (param.required) {
-            setActionError(`Init parameter \`${param.name}\` is required.`)
+            pushNotification('error', `Init parameter \`${param.name}\` is required.`)
             return
           }
           continue
@@ -640,50 +854,72 @@ export function LoadTestingScreen() {
 
     try {
       setStarting(true)
-      setActionError(null)
-      setActionMessage(null)
       await startTest({
         target_users: targetUsers,
         init_params: initParams,
       })
       setStartModalOpen(false)
-      setActionMessage('Start command sent.')
+      pushNotification('success', 'Start command sent.')
       await refresh()
     } catch (startError) {
-      setActionError(startError instanceof Error ? startError.message : 'Failed to start test')
+      pushNotification('error', startError instanceof Error ? startError.message : 'Failed to start test')
     } finally {
       setStarting(false)
     }
-  }, [initParamValues, refresh, scenarioSpec, targetUsersInput])
+  }, [initParamValues, pushNotification, refresh, scenarioSpec, targetUsersInput])
+
+  const onChangeUsers = useCallback(async () => {
+    const targetUsers = Number(changeUsersInput)
+    if (!Number.isInteger(targetUsers) || targetUsers < 0) {
+      pushNotification('error', 'Users must be an integer >= 0.')
+      return
+    }
+
+    try {
+      setChangingUsers(true)
+      await changeUsers({ target_users: targetUsers })
+      setChangeUsersModalOpen(false)
+      pushNotification('success', 'Users change command sent.')
+      await refresh()
+    } catch (changeError) {
+      pushNotification(
+        'error',
+        changeError instanceof Error ? changeError.message : 'Failed to change users',
+      )
+    } finally {
+      setChangingUsers(false)
+    }
+  }, [changeUsersInput, pushNotification, refresh])
 
   const onCreateResource = useCallback(async () => {
     const name = selectedResourceName.trim()
     const count = Number(resourceCountInput)
 
     if (!name) {
-      setActionError('Resource name is required.')
+      pushNotification('error', 'Resource name is required.')
       return
     }
 
     if (!Number.isInteger(count) || count < 1) {
-      setActionError('Resource count must be an integer >= 1.')
+      pushNotification('error', 'Resource count must be an integer >= 1.')
       return
     }
 
     try {
       setCreatingResource(true)
-      setActionError(null)
-      setActionMessage(null)
       await createResource({ name, count })
       setResourceModalOpen(false)
-      setActionMessage(`Created ${count} resource(s) for ${name}.`)
+      pushNotification('success', `Created ${count} resource(s) for ${name}.`)
       await refresh()
     } catch (createError) {
-      setActionError(createError instanceof Error ? createError.message : 'Failed to create resources')
+      pushNotification(
+        'error',
+        createError instanceof Error ? createError.message : 'Failed to create resources',
+      )
     } finally {
       setCreatingResource(false)
     }
-  }, [refresh, resourceCountInput, selectedResourceName])
+  }, [pushNotification, refresh, resourceCountInput, selectedResourceName])
 
   const toggleColumn = useCallback((columnId: StatsColumnId) => {
     setVisibleColumns((current) => {
@@ -750,6 +986,32 @@ export function LoadTestingScreen() {
       window.removeEventListener('pointerdown', onPointerDown)
     }
   }, [columnsOpen])
+
+  useEffect(() => {
+    if (!error) {
+      if (lastFetchErrorRef.current !== null) {
+        pushNotification('success', 'Connection restored.')
+      }
+      lastFetchErrorRef.current = null
+      return
+    }
+
+    if (lastFetchErrorRef.current === error) {
+      return
+    }
+    lastFetchErrorRef.current = error
+    pushNotification('error', `Failed to fetch data: ${error}`)
+  }, [error, pushNotification])
+
+  useEffect(() => {
+    const timers = notificationTimersRef.current
+    return () => {
+      for (const timerId of timers.values()) {
+        window.clearTimeout(timerId)
+      }
+      timers.clear()
+    }
+  }, [])
 
   useEffect(() => {
     if (availableMetricIds.length === 0) {
@@ -848,7 +1110,7 @@ export function LoadTestingScreen() {
         </div>
 
         <div className="topbar__status-group">
-          <div className="pill pill--state">
+          <div className={`pill pill--state ${statusToneClass(ready?.state)}`}>
             <Play size={10} fill="currentColor" />
             <span>{statusLabel(ready?.state)}</span>
           </div>
@@ -879,6 +1141,12 @@ export function LoadTestingScreen() {
               <span>{stopping ? 'Stopping...' : 'Stop'}</span>
             </button>
           ) : null}
+          {canChangeUsers ? (
+            <button className="btn" type="button" onClick={openChangeUsersModal}>
+              <Users size={12} />
+              <span>Change users</span>
+            </button>
+          ) : null}
           <button className="btn" type="button" onClick={() => openResourceModal()}>
             <Layers size={12} />
             <span>Create resources</span>
@@ -900,36 +1168,60 @@ export function LoadTestingScreen() {
       </nav>
 
       <main className="content">
-        {actionError ? <div className="status-banner status-banner--error">{actionError}</div> : null}
-        {actionMessage ? <div className="status-banner">{actionMessage}</div> : null}
-        {error ? <div className="status-banner status-banner--error">Failed to fetch data: {error}</div> : null}
-        {!error && loading ? <div className="status-banner">Loading data from {API_BASE_URL} ...</div> : null}
-
         {activeTab === 'statistics' ? (
           <>
             <section className="section-header">
               <h1>Test Statistics</h1>
-              <div className="columns-control" ref={columnsContainerRef}>
-                <button className="btn" type="button" onClick={() => setColumnsOpen((current) => !current)}>
-                  <Columns3 size={12} />
-                  <span>Columns</span>
-                  <ChevronDown size={12} />
-                </button>
-                {columnsOpen ? (
-                  <div className="columns-menu">
-                    {statsColumns.map((column) => (
-                      <label key={column.id} className="columns-menu__item">
-                        <input
-                          type="checkbox"
-                          checked={visibleColumns.includes(column.id)}
-                          disabled={column.required}
-                          onChange={() => toggleColumn(column.id)}
-                        />
-                        <span>{column.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
+              <div className="statistics-controls">
+                <div className="stats-scope-toggle" role="group" aria-label="Statistics scope">
+                  <button
+                    className={
+                      statsScope === 'window'
+                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active'
+                        : 'stats-scope-toggle__btn'
+                    }
+                    type="button"
+                    onClick={() => setStatsScope('window')}
+                    aria-pressed={statsScope === 'window'}
+                  >
+                    Window
+                  </button>
+                  <button
+                    className={
+                      statsScope === 'total'
+                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active'
+                        : 'stats-scope-toggle__btn'
+                    }
+                    type="button"
+                    onClick={() => setStatsScope('total')}
+                    aria-pressed={statsScope === 'total'}
+                  >
+                    Whole test
+                  </button>
+                </div>
+
+                <div className="columns-control" ref={columnsContainerRef}>
+                  <button className="btn" type="button" onClick={() => setColumnsOpen((current) => !current)}>
+                    <Columns3 size={12} />
+                    <span>Columns</span>
+                    <ChevronDown size={12} />
+                  </button>
+                  {columnsOpen ? (
+                    <div className="columns-menu">
+                      {statsColumns.map((column) => (
+                        <label key={column.id} className="columns-menu__item">
+                          <input
+                            type="checkbox"
+                            checked={visibleColumns.includes(column.id)}
+                            disabled={column.required}
+                            onChange={() => toggleColumn(column.id)}
+                          />
+                          <span>{column.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </section>
 
@@ -952,7 +1244,11 @@ export function LoadTestingScreen() {
                   ) : (
                     rows.map((row) => (
                       <tr key={row.name}>
-                        {visibleColumns.includes('name') ? <td>{row.name}</td> : null}
+                        {visibleColumns.includes('name') ? (
+                          <td className={row.isNested ? 'stats-name-cell stats-name-cell--nested' : 'stats-name-cell'}>
+                            {row.name}
+                          </td>
+                        ) : null}
                         {visibleColumns.includes('success') ? <td>{numberFormatter.format(row.success)}</td> : null}
                         {visibleColumns.includes('failure') ? <td>{numberFormatter.format(row.failure)}</td> : null}
                         {visibleColumns.includes('medianMs') ? <td>{formatMaybeNumber(row.medianMs)}</td> : null}
@@ -1048,7 +1344,7 @@ export function LoadTestingScreen() {
                       <td colSpan={5}>No workers in orchestrator state (/workers).</td>
                     </tr>
                   ) : (
-                    workerRows.map(({ worker, badge, cpuLoad, ramLoad }) => (
+                    workerRows.map(({ worker, badge, cpuLoad, ramLoad, ramUsage }) => (
                       <tr key={worker.worker_id}>
                         <td>{worker.worker_id}</td>
                         <td>
@@ -1092,7 +1388,7 @@ export function LoadTestingScreen() {
                                   style={{ width: `${ramLoad}%` }}
                                 />
                               </div>
-                              <span>{ramLoad}%</span>
+                              <span>{ramUsage ?? '—'}</span>
                             </div>
                           )}
                         </td>
@@ -1282,6 +1578,26 @@ export function LoadTestingScreen() {
         ) : null}
       </main>
 
+      <section className="notification-stack" aria-live="polite" aria-atomic="true">
+        {notifications.map((item) => (
+          <article
+            key={item.id}
+            className={`notification notification--${item.tone}`}
+            role={item.tone === 'error' ? 'alert' : 'status'}
+          >
+            <p className="notification__message">{item.message}</p>
+            <button
+              className="notification__close"
+              type="button"
+              aria-label="Dismiss notification"
+              onClick={() => dismissNotification(item.id)}
+            >
+              <X size={13} />
+            </button>
+          </article>
+        ))}
+      </section>
+
       {startModalOpen ? (
         <div className="modal-overlay" role="presentation" onClick={() => setStartModalOpen(false)}>
           <section className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
@@ -1346,6 +1662,72 @@ export function LoadTestingScreen() {
               <button className="btn btn--primary" type="button" onClick={() => void onStart()} disabled={starting}>
                 <Play size={12} />
                 <span>{starting ? 'Starting...' : 'Start Test'}</span>
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {changeUsersModalOpen ? (
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={() => {
+            if (!changingUsers) {
+              setChangeUsersModalOpen(false)
+            }
+          }}
+        >
+          <section
+            className="modal modal--sm"
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="modal__header">
+              <h2>Change Users</h2>
+              <button
+                className="modal__close"
+                type="button"
+                onClick={() => setChangeUsersModalOpen(false)}
+                disabled={changingUsers}
+              >
+                <X size={14} />
+              </button>
+            </header>
+
+            <div className="modal__content">
+              <label className="field">
+                <span className="field__label">Users</span>
+                <input
+                  className="field__input"
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={changeUsersInput}
+                  onChange={(event) => setChangeUsersInput(event.target.value)}
+                />
+                <span className="field__hint">Target concurrent users for current running test.</span>
+              </label>
+            </div>
+
+            <footer className="modal__footer">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => setChangeUsersModalOpen(false)}
+                disabled={changingUsers}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn--primary"
+                type="button"
+                onClick={() => void onChangeUsers()}
+                disabled={changingUsers}
+              >
+                <Users size={12} />
+                <span>{changingUsers ? 'Applying...' : 'Change users'}</span>
               </button>
             </footer>
           </section>

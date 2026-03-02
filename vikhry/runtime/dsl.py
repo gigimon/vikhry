@@ -56,7 +56,9 @@ class VU:
         self._http_base_url = http_base_url
         self._http_client: SupportsHTTP | None = None
 
-    async def on_init(self, **_kwargs: Any) -> None:
+    async def on_init(self, base_url: str = "", **_kwargs: Any) -> None:
+        if base_url:
+            self._http_base_url = str(base_url)
         self.ensure_http_client()
 
     async def on_start(self) -> None:
@@ -72,8 +74,10 @@ class VU:
         if self._http_client is not None:
             return self._http_client
 
-        class_http_spec = getattr(type(self), "http", ReqwestClient())
-        client = resolve_http_client(class_http_spec, base_url=self._http_base_url)
+        http_spec = getattr(self, "http", None)
+        if http_spec is None:
+            http_spec = getattr(type(self), "http", ReqwestClient())
+        client = resolve_http_client(http_spec, base_url=self._http_base_url)
         self._http_client = client
         self.http = client
         return client

@@ -35,7 +35,7 @@ Worker обновляет hash:
   - `last_heartbeat`: unix timestamp
   - `cpu_percent`: загрузка процесса worker (проценты)
   - `rss_bytes`: потребление памяти процесса worker (RSS, bytes)
-  - `memory_percent`: доля RSS от системной памяти (проценты)
+  - `total_ram_bytes`: общий объем системной RAM (bytes)
 
 На graceful shutdown worker делает best-effort `status=unhealthy`, затем unregister.
 

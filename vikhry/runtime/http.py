@@ -25,7 +25,10 @@ class SupportsHTTPFactory(Protocol):
 
 class ReqwestHTTPClient:
     def __init__(self, *, base_url: str = "", timeout: float = 30.0) -> None:
-        builder = ClientBuilder().timeout(timedelta(seconds=max(0.1, timeout)))
+        resolved_timeout = max(0.1, timeout)
+        self.base_url = base_url
+        self.timeout = resolved_timeout
+        builder = ClientBuilder().timeout(timedelta(seconds=resolved_timeout))
         if base_url:
             builder = builder.base_url(base_url)
         self._client = builder.build()
@@ -153,6 +156,20 @@ class ReqwestClient:
         resolved_base_url = base_url or self.base_url
         return ReqwestHTTPClient(base_url=resolved_base_url, timeout=self.timeout)
 
+    def __call__(
+        self,
+        *,
+        base_url: str = "",
+        timeout: float | None = None,
+    ) -> SupportsHTTP:
+        if timeout is None:
+            return instrument_http_client(self.create(base_url=base_url))
+
+        resolved_base_url = base_url or self.base_url
+        return instrument_http_client(
+            ReqwestHTTPClient(base_url=resolved_base_url, timeout=timeout)
+        )
+
 
 def resolve_http_client(http_spec: object, *, base_url: str = "") -> SupportsHTTP:
     if _is_http_client(http_spec):
@@ -175,6 +192,15 @@ def resolve_http_client(http_spec: object, *, base_url: str = "") -> SupportsHTT
         instance = http_spec()
         if _is_http_client(instance):
             return instrument_http_client(instance)
+
+    if callable(http_spec):
+        try:
+            client = http_spec(base_url=base_url)
+        except TypeError:
+            client = http_spec()
+        if not _is_http_client(client):
+            raise TypeError("http callable factory must return object with async request()")
+        return instrument_http_client(client)
 
     raise TypeError(
         "VU http attribute must be an HTTP client or factory with create()"

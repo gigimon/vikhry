@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,10 +59,12 @@ class LifecycleService:
         state_repo: TestStateRepository,
         user_orchestration: UserOrchestrationService,
         resource_service: ResourceService,
+        on_before_start_test: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._user_orchestration = user_orchestration
         self._resource_service = resource_service
+        self._on_before_start_test = on_before_start_test
 
     async def state_snapshot(self) -> dict[str, str | int]:
         state = await self._state_repo.get_state()
@@ -84,6 +87,11 @@ class LifecycleService:
         if target_users < 0:
             raise ValueError("target_users must be >= 0")
         resolved_init_params = dict(init_params or {})
+        logger.info(
+            "start_test requested target_users=%s init_param_keys=%s",
+            target_users,
+            sorted(resolved_init_params.keys()),
+        )
 
         epoch = await self._state_repo.start_preparing_and_bump_epoch()
         if epoch is None:
@@ -93,8 +101,12 @@ class LifecycleService:
                 expected=(TestState.IDLE,),
                 current=current,
             )
+        logger.info("start_test entered preparing epoch=%s target_users=%s", epoch, target_users)
 
         try:
+            if self._on_before_start_test is not None:
+                await self._on_before_start_test()
+                logger.info("start_test cleared previous metrics epoch=%s", epoch)
             prepare_result = await self._prepare_resources(target_users)
             start_result = await self._user_orchestration.send_start_test(
                 epoch,
@@ -108,6 +120,13 @@ class LifecycleService:
                 updated_at=self._now_ts(),
             )
             await self._state_repo.set_state(TestState.RUNNING)
+            logger.info(
+                "start_test completed epoch=%s target_users=%s workers_started=%s users_added=%s",
+                epoch,
+                target_users,
+                start_result.get("delivered"),
+                add_result.get("requested"),
+            )
             return StartTestResult(
                 epoch=epoch,
                 target_users=target_users,
@@ -117,6 +136,11 @@ class LifecycleService:
                 start_result=start_result,
             )
         except Exception:  # noqa: BLE001
+            logger.exception(
+                "start_test failed epoch=%s target_users=%s, attempting rollback",
+                epoch,
+                target_users,
+            )
             try:
                 await self._user_orchestration.send_stop_test(epoch)
             except Exception:  # noqa: BLE001
@@ -124,6 +148,7 @@ class LifecycleService:
             # Rollback to stable state for v1 if start sequence failed.
             await self._state_repo.clear_users_data()
             await self._state_repo.set_state(TestState.IDLE)
+            logger.info("start_test rollback completed epoch=%s state=%s", epoch, TestState.IDLE.value)
             raise
 
     async def change_users(self, target_users: int) -> ChangeUsersResult:
@@ -182,6 +207,7 @@ class LifecycleService:
 
     async def stop_test(self) -> StopTestResult:
         current = await self._state_repo.get_state()
+        logger.info("stop_test requested current_state=%s", current.value)
         expected = (TestState.PREPARING, TestState.RUNNING)
         if current not in expected:
             raise InvalidStateTransitionError(
@@ -203,6 +229,12 @@ class LifecycleService:
         stop_result = await self._user_orchestration.send_stop_test(epoch)
         await self._state_repo.clear_users_data()
         await self._state_repo.set_state(TestState.IDLE)
+        logger.info(
+            "stop_test completed epoch=%s workers_stopped=%s state=%s",
+            epoch,
+            stop_result.get("delivered"),
+            TestState.IDLE.value,
+        )
         return StopTestResult(epoch=epoch, stop_result=stop_result)
 
     async def _prepare_resources(self, target_users: int) -> dict[str, object]:

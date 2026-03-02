@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import ast
+import importlib
+import inspect
 from pathlib import Path
 from typing import Any
+
+from vikhry.runtime import VU, collect_resource_factories
 
 
 class ScenarioLoadError(RuntimeError):
@@ -13,24 +17,14 @@ def load_resource_names_from_scenario(scenario_path: str | Path | None) -> list[
     if not scenario_path:
         return []
 
-    path = Path(scenario_path).expanduser().resolve()
-    if not path.exists():
-        raise ScenarioLoadError(f"Scenario file not found: {path}")
-    if not path.is_file():
-        raise ScenarioLoadError(f"Scenario path is not a file: {path}")
+    scenario_ref = str(scenario_path).strip()
+    if not _is_existing_file_path(scenario_ref) and _looks_like_import_path(scenario_ref):
+        module, _vu_type = _load_module_and_vu_type(scenario_ref)
+        factories = collect_resource_factories(module.__dict__)
+        return sorted(factories)
 
-    try:
-        source = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ScenarioLoadError(f"Failed to read scenario file: {path}: {exc}") from exc
-
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as exc:
-        raise ScenarioLoadError(f"Scenario parse error in {path}: {exc}") from exc
-
+    tree = _load_scenario_ast(scenario_ref)
     resource_names: set[str] = set()
-
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
             continue
@@ -38,7 +32,6 @@ def load_resource_names_from_scenario(scenario_path: str | Path | None) -> list[
             resource_name = _extract_resource_name(decorator)
             if resource_name:
                 resource_names.add(resource_name)
-
     return sorted(resource_names)
 
 
@@ -52,27 +45,54 @@ def load_on_init_spec_from_scenario(scenario_path: str | Path | None) -> dict[st
             "accepts_arbitrary_kwargs": False,
         }
 
-    path = Path(scenario_path).expanduser().resolve()
-    if not path.exists():
-        raise ScenarioLoadError(f"Scenario file not found: {path}")
-    if not path.is_file():
-        raise ScenarioLoadError(f"Scenario path is not a file: {path}")
+    scenario_ref = str(scenario_path).strip()
+    if not _is_existing_file_path(scenario_ref) and _looks_like_import_path(scenario_ref):
+        module, vu_type = _load_module_and_vu_type(scenario_ref)
+        _ = module
+        on_init = getattr(vu_type, "on_init", None)
+        if not callable(on_init):
+            return {
+                "configured": True,
+                "scenario_path": scenario_ref,
+                "vu_class": vu_type.__name__,
+                "params": [],
+                "accepts_arbitrary_kwargs": False,
+            }
 
-    try:
-        source = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ScenarioLoadError(f"Failed to read scenario file: {path}: {exc}") from exc
+        signature = inspect.signature(on_init)
+        params: list[dict[str, Any]] = []
+        accepts_kwargs = False
+        for parameter in signature.parameters.values():
+            if parameter.name == "self":
+                continue
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                accepts_kwargs = True
+                continue
 
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as exc:
-        raise ScenarioLoadError(f"Scenario parse error in {path}: {exc}") from exc
+            params.append(
+                {
+                    "name": parameter.name,
+                    "kind": _normalize_parameter_kind(parameter.kind),
+                    "required": parameter.default is inspect.Signature.empty,
+                    "annotation": _format_runtime_annotation(parameter.annotation),
+                    "default": _format_runtime_default(parameter.default),
+                }
+            )
 
+        return {
+            "configured": True,
+            "scenario_path": scenario_ref,
+            "vu_class": vu_type.__name__,
+            "params": params,
+            "accepts_arbitrary_kwargs": accepts_kwargs,
+        }
+
+    tree = _load_scenario_ast(scenario_ref)
     vu_class = _find_first_vu_class(tree)
     if vu_class is None:
         return {
             "configured": True,
-            "scenario_path": str(path),
+            "scenario_path": str(Path(scenario_ref).expanduser().resolve()),
             "vu_class": None,
             "params": [],
             "accepts_arbitrary_kwargs": False,
@@ -82,7 +102,7 @@ def load_on_init_spec_from_scenario(scenario_path: str | Path | None) -> dict[st
     if on_init is None:
         return {
             "configured": True,
-            "scenario_path": str(path),
+            "scenario_path": str(Path(scenario_ref).expanduser().resolve()),
             "vu_class": vu_class.name,
             "params": [],
             "accepts_arbitrary_kwargs": False,
@@ -123,11 +143,111 @@ def load_on_init_spec_from_scenario(scenario_path: str | Path | None) -> dict[st
 
     return {
         "configured": True,
-        "scenario_path": str(path),
+        "scenario_path": str(Path(scenario_ref).expanduser().resolve()),
         "vu_class": vu_class.name,
         "params": params,
         "accepts_arbitrary_kwargs": accepts_kwargs,
     }
+
+
+def _load_scenario_ast(scenario_path: str) -> ast.AST:
+    path = Path(scenario_path).expanduser().resolve()
+    if not path.exists():
+        raise ScenarioLoadError(f"Scenario file not found: {path}")
+    if not path.is_file():
+        raise ScenarioLoadError(f"Scenario path is not a file: {path}")
+
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ScenarioLoadError(f"Failed to read scenario file: {path}: {exc}") from exc
+
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise ScenarioLoadError(f"Scenario parse error in {path}: {exc}") from exc
+    return tree
+
+
+def _load_module_and_vu_type(scenario_import: str) -> tuple[Any, type[VU]]:
+    module_name, vu_name = _parse_scenario_import(scenario_import)
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:  # noqa: BLE001
+        raise ScenarioLoadError(
+            f"Failed to import scenario module `{module_name}`: {exc}"
+        ) from exc
+
+    candidate = getattr(module, vu_name, None)
+    if candidate is None:
+        raise ScenarioLoadError(
+            f"Scenario class `{vu_name}` not found in module `{module_name}`"
+        )
+    if not inspect.isclass(candidate):
+        raise ScenarioLoadError(
+            f"Scenario target `{scenario_import}` must be a class"
+        )
+    if not issubclass(candidate, VU):
+        raise ScenarioLoadError(
+            f"Scenario class `{scenario_import}` must inherit from VU"
+        )
+    return module, candidate
+
+
+def _looks_like_import_path(value: str) -> bool:
+    if ":" not in value:
+        return False
+    module_name, sep, vu_name = value.partition(":")
+    return bool(
+        sep and module_name and vu_name and "/" not in module_name and "\\" not in module_name
+    )
+
+
+def _is_existing_file_path(value: str) -> bool:
+    try:
+        return Path(value).expanduser().exists()
+    except OSError:
+        return False
+
+
+def _parse_scenario_import(value: str) -> tuple[str, str]:
+    module_name, sep, vu_name = value.partition(":")
+    if not sep or not module_name or not vu_name:
+        raise ScenarioLoadError(
+            "Scenario must use import path format `module.path:ClassName`"
+        )
+    return module_name.strip(), vu_name.strip()
+
+
+def _normalize_parameter_kind(kind: inspect._ParameterKind) -> str:
+    if kind is inspect.Parameter.KEYWORD_ONLY:
+        return "keyword_only"
+    if kind is inspect.Parameter.POSITIONAL_ONLY:
+        return "positional_only"
+    if kind is inspect.Parameter.VAR_POSITIONAL:
+        return "var_positional"
+    return "positional_or_keyword"
+
+
+def _format_runtime_annotation(annotation: object) -> str | None:
+    if annotation is inspect.Signature.empty:
+        return None
+    if isinstance(annotation, str):
+        return annotation
+    name = getattr(annotation, "__name__", None)
+    if isinstance(name, str):
+        return name
+    return str(annotation)
+
+
+def _format_runtime_default(default: object) -> Any:
+    if default is inspect.Signature.empty:
+        return None
+    if isinstance(default, (str, int, float, bool)) or default is None:
+        return default
+    if isinstance(default, (list, dict, tuple)):
+        return default
+    return repr(default)
 
 
 def _extract_resource_name(decorator: ast.AST) -> str | None:

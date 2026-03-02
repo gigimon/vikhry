@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -8,6 +9,8 @@ from vikhry.orchestrator.models.resource import (
     EnsureResourceCountResult,
 )
 from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
+
+logger = logging.getLogger(__name__)
 
 
 class ResourceService:
@@ -22,6 +25,11 @@ class ResourceService:
         self._default_prepare_counts = default_prepare_counts or {}
 
     async def prepare_for_start(self, target_users: int) -> dict[str, Any]:
+        logger.info(
+            "prepare_for_start target_users=%s scenario_resources=%s mode=manual",
+            target_users,
+            self._scenario_resource_names,
+        )
         created: dict[str, int] = {}
         for resource_name, desired_count in self._default_prepare_counts.items():
             if desired_count < 0:
@@ -69,6 +77,14 @@ class ResourceService:
             created_resource_ids = result.resource_ids
 
         current_count = existing_count + count_to_create
+        logger.info(
+            "ensure_resource_count resource_name=%s existing_count=%s target_count=%s created_count=%s current_count=%s",
+            resource_name,
+            existing_count,
+            target_count,
+            count_to_create,
+            current_count,
+        )
         return EnsureResourceCountResult(
             resource_name=resource_name,
             target_count=target_count,
@@ -103,6 +119,15 @@ class ResourceService:
             )
             resource_ids.append(resource_id)
 
+        first_resource_id = resource_ids[0] if resource_ids else None
+        last_resource_id = resource_ids[-1] if resource_ids else None
+        logger.info(
+            "create_resources resource_name=%s count=%s first_resource_id=%s last_resource_id=%s",
+            resource_name,
+            count,
+            first_resource_id,
+            last_resource_id,
+        )
         return CreateResourceResult(
             resource_name=resource_name,
             count=count,
@@ -111,6 +136,9 @@ class ResourceService:
 
     async def counters(self) -> dict[str, int]:
         return await self._state_repo.list_resource_counters()
+
+    def scenario_resource_names(self) -> list[str]:
+        return list(self._scenario_resource_names)
 
     @staticmethod
     def _now_ts() -> int:

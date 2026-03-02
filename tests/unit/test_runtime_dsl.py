@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vikhry.runtime import VU, between, bind_steps, collect_resource_factories, collect_vu_steps, resource, step
+from vikhry.runtime import ReqwestClient, VU, between, bind_steps, collect_resource_factories, collect_vu_steps, resource, step
 from vikhry.runtime.dsl import resolve_every_delay
 
 
@@ -54,6 +54,17 @@ class _ExampleVU(VU):
 
 class _FactoryVU(VU):
     http = _FactoryHttp()
+
+
+class _ReqwestFactoryVU(VU):
+    http = ReqwestClient(timeout=5)
+
+    async def on_init(self, base_url: str) -> None:
+        self.http = self.http(base_url=base_url)
+
+
+class _BaseInitVU(VU):
+    http = ReqwestClient(timeout=5)
 
 
 def _make_vu(vu_type: type[VU]) -> VU:
@@ -141,5 +152,38 @@ async def test_vu_on_init_materializes_http_client_spec() -> None:
         assert callable(getattr(vu.http, "request", None))
         assert vu.http.base_url == "http://localhost:8000"
         assert _FactoryVU.http.calls == 1
+    finally:
+        await vu.close()
+
+
+@pytest.mark.asyncio
+async def test_vu_on_init_allows_callable_http_factory_spec() -> None:
+    vu = _ReqwestFactoryVU(
+        user_id="u1",
+        worker_id="w1",
+        resources=_DummyResources(),
+        http_base_url="",
+    )
+    await vu.on_init(base_url="http://localhost:8000")
+    try:
+        client = vu.ensure_http_client()
+        assert callable(getattr(client, "request", None))
+        assert vu.http.base_url == "http://localhost:8000"
+    finally:
+        await vu.close()
+
+
+@pytest.mark.asyncio
+async def test_base_vu_on_init_accepts_base_url_spec() -> None:
+    vu = _BaseInitVU(
+        user_id="u1",
+        worker_id="w1",
+        resources=_DummyResources(),
+        http_base_url="",
+    )
+    await vu.on_init(base_url="http://localhost:8000")
+    try:
+        assert callable(getattr(vu.http, "request", None))
+        assert vu.http.base_url == "http://localhost:8000"
     finally:
         await vu.close()

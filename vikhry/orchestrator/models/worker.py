@@ -18,3 +18,4 @@ class WorkerStatus(BaseModel):
     cpu_percent: float | None = Field(default=None, ge=0)
     rss_bytes: int | None = Field(default=None, ge=0)
     memory_percent: float | None = Field(default=None, ge=0)
+    total_ram_bytes: int | None = Field(default=None, ge=0)

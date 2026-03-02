@@ -69,10 +69,10 @@ def orchestrator_start(
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8080,
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
     scenario: Annotated[
-        Path | None,
+        str | None,
         typer.Option(
             "--scenario",
-            help="Path to Python scenario file. Resource decorators will be parsed for PREPARING.",
+            help="Scenario import path in `module.path:ClassName` format.",
         ),
     ] = None,
     heartbeat_timeout_s: Annotated[int, typer.Option("--heartbeat-timeout-s", min=1)] = 15,
@@ -108,7 +108,7 @@ def orchestrator_start(
         host=host,
         port=port,
         redis_url=redis_url,
-        scenario=str(scenario) if scenario else None,
+        scenario=scenario or None,
         heartbeat_timeout_s=heartbeat_timeout_s,
         worker_scan_interval_s=worker_scan_interval_s,
         metrics_poll_interval_s=metrics_poll_interval_s,
@@ -133,7 +133,13 @@ def orchestrator_serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8080,
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
-    scenario: Annotated[Path | None, typer.Option("--scenario")] = None,
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            help="Scenario import path in `module.path:ClassName` format.",
+        ),
+    ] = None,
     heartbeat_timeout_s: Annotated[int, typer.Option("--heartbeat-timeout-s", min=1)] = 15,
     worker_scan_interval_s: Annotated[int, typer.Option("--worker-scan-interval-s", min=1)] = 5,
     metrics_poll_interval_s: Annotated[
@@ -155,7 +161,7 @@ def orchestrator_serve(
         host=host,
         port=port,
         redis_url=redis_url,
-        scenario=str(scenario) if scenario else None,
+        scenario=scenario or None,
         heartbeat_timeout_s=heartbeat_timeout_s,
         worker_scan_interval_s=worker_scan_interval_s,
         metrics_poll_interval_s=metrics_poll_interval_s,
@@ -223,6 +229,10 @@ def orchestrator_stop(
 def worker_start(
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
     worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
+    log_level: Annotated[
+        str,
+        typer.Option("--log-level", help="Python logging level (e.g. DEBUG, INFO, WARNING)."),
+    ] = "INFO",
     heartbeat_interval_s: Annotated[
         float, typer.Option("--heartbeat-interval-s", min=0.1)
     ] = 3.0,
@@ -269,6 +279,7 @@ def worker_start(
     settings = WorkerSettings(
         redis_url=redis_url,
         worker_id=resolved_worker_id,
+        log_level=log_level,
         heartbeat_interval_s=heartbeat_interval_s,
         command_poll_timeout_s=command_poll_timeout_s,
         graceful_stop_timeout_s=graceful_stop_timeout_s,
@@ -292,6 +303,10 @@ def worker_start(
 def worker_serve(
     redis_url: Annotated[str, typer.Option("--redis-url")] = "redis://127.0.0.1:6379/0",
     worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
+    log_level: Annotated[
+        str,
+        typer.Option("--log-level", help="Python logging level (e.g. DEBUG, INFO, WARNING)."),
+    ] = "INFO",
     heartbeat_interval_s: Annotated[
         float, typer.Option("--heartbeat-interval-s", min=0.1)
     ] = 3.0,
@@ -328,6 +343,7 @@ def worker_serve(
     settings = WorkerSettings(
         redis_url=redis_url,
         worker_id=_resolve_worker_id(worker_id),
+        log_level=log_level,
         heartbeat_interval_s=heartbeat_interval_s,
         command_poll_timeout_s=command_poll_timeout_s,
         graceful_stop_timeout_s=graceful_stop_timeout_s,
@@ -598,6 +614,8 @@ def _start_worker_detached_or_exit(
         settings.redis_url,
         "--worker-id",
         settings.worker_id,
+        "--log-level",
+        settings.log_level,
         "--heartbeat-interval-s",
         str(settings.heartbeat_interval_s),
         "--command-poll-timeout-s",

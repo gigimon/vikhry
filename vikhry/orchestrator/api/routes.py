@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import asdict
 from typing import Any
 
@@ -24,6 +25,8 @@ from vikhry.orchestrator.services.worker_presence import (
     NoAliveWorkersError,
     WorkerPresenceService,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -180,7 +183,11 @@ def register_routes(
     @app.get("/resources")
     async def resources() -> dict[str, object] | Response:
         try:
-            return await _build_resources_response(state_repo=state_repo, now_ts=worker_presence.now_ts())
+            return await _build_resources_response(
+                state_repo=state_repo,
+                now_ts=worker_presence.now_ts(),
+                declared_resource_names=resource_service.scenario_resource_names(),
+            )
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)
 
@@ -242,15 +249,15 @@ def _worker_payload(
     last_heartbeat: int | None = None
     heartbeat_age_s: int | None = None
     cpu_percent: float | None = None
-    rss_bytes: int | None = None
-    memory_percent: float | None = None
+    process_ram_bytes: int | None = None
+    total_ram_bytes: int | None = None
     if status is not None:
         status_value = status.status.value
         last_heartbeat = status.last_heartbeat
         heartbeat_age_s = max(0, now_ts - status.last_heartbeat)
         cpu_percent = status.cpu_percent
-        rss_bytes = status.rss_bytes
-        memory_percent = status.memory_percent
+        process_ram_bytes = status.rss_bytes
+        total_ram_bytes = status.total_ram_bytes
     return {
         "worker_id": worker_id,
         "status": status_value,
@@ -258,8 +265,8 @@ def _worker_payload(
         "heartbeat_age_s": heartbeat_age_s,
         "users_count": users_count,
         "cpu_percent": cpu_percent,
-        "rss_bytes": rss_bytes,
-        "memory_percent": memory_percent,
+        "process_ram_bytes": process_ram_bytes,
+        "total_ram_bytes": total_ram_bytes,
     }
 
 
@@ -282,11 +289,13 @@ def _ready_worker_payload(
 async def _build_resources_response(
     state_repo: TestStateRepository,
     now_ts: int,
+    declared_resource_names: list[str] | None = None,
 ) -> dict[str, object]:
     counters = await state_repo.list_resource_counters()
+    all_resource_names = sorted(set(counters) | set(declared_resource_names or []))
     resources = [
-        {"resource_name": resource_name, "count": count}
-        for resource_name, count in sorted(counters.items())
+        {"resource_name": resource_name, "count": counters.get(resource_name, 0)}
+        for resource_name in all_resource_names
     ]
     return {
         "generated_at": now_ts,
@@ -353,6 +362,7 @@ def _exception_to_response(exc: Exception) -> Response:
             code="bad_request",
             message=str(exc),
         )
+    logger.exception("unhandled api exception", exc_info=(type(exc), exc, exc.__traceback__))
     return _error_response(
         status=500,
         code="internal_error",
@@ -383,7 +393,7 @@ def _query_value(request: Request, key: str) -> str | None:
         return None
     raw_value: object | None = None
     if hasattr(query, "get"):
-        raw_value = query.get(key)
+        raw_value = query.get(key, None)
     elif isinstance(query, dict):
         raw_value = query.get(key)
     if raw_value is None:

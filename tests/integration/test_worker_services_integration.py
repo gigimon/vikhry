@@ -189,7 +189,7 @@ async def test_heartbeat_writes_status_key_spec(redis_client: redis.Redis) -> No
         assert raw.get("status") == WorkerHealthStatus.HEALTHY.value
         assert "cpu_percent" in raw
         assert "rss_bytes" in raw
-        assert "memory_percent" in raw
+        assert "total_ram_bytes" in raw
     finally:
         await service.stop()
 

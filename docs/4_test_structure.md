@@ -37,6 +37,18 @@ class MyVU(VU):
         await self.http.post("/auth")
 ```
 
+Для кастомизации HTTP-клиента через фабрику в `on_init`:
+
+```python
+from vikhry import ReqwestClient, VU
+
+class MyVU(VU):
+    http = ReqwestClient(timeout=5)
+
+    async def on_init(self, base_url: str):
+        self.http = self.http(base_url=base_url)
+```
+
 Параметры `on_init` orchestrator извлекает из scenario-файла и отдает через:
 - `GET /scenario/on_init_params`
 

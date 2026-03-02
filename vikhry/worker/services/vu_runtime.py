@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from vikhry.runtime import VU, bind_steps, resolve_every_delay
-from vikhry.runtime.metrics import emit_metric, extract_status_code, is_success_status, metric_scope
+from vikhry.runtime.metrics import emit_metric, metric_scope
 from vikhry.runtime.strategy import SequentialWeightedStrategy, StepStrategy
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
 from vikhry.worker.services.metrics import WorkerMetricsPublisher
@@ -129,7 +129,6 @@ class WorkerVURuntime:
     ) -> None:
         spec = bound_step.spec
         started_at = time.perf_counter()
-        status_code: int | None = None
         error_text: str | None = None
         success = False
         cancelled = False
@@ -137,27 +136,22 @@ class WorkerVURuntime:
         with metric_scope(step=spec.step_name):
             try:
                 if spec.timeout is None:
-                    result = await bound_step.call()
+                    await bound_step.call()
                 else:
                     async with asyncio.timeout(spec.timeout):
-                        result = await bound_step.call()
-                status_code = extract_status_code(result)
-                success = is_success_status(status_code)
-                if success:
-                    completed_steps.add(spec.step_name)
-                else:
-                    error_text = f"http_status_{status_code}"
+                        await bound_step.call()
+                success = True
+                completed_steps.add(spec.step_name)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
             except Exception as exc:  # noqa: BLE001
                 error_text = f"{type(exc).__name__}: {exc}"
-                logger.debug(
-                    "VU step failed (worker_id=%s, user_id=%s, step=%s)",
+                logger.exception(
+                    "VU step raised exception (worker_id=%s, user_id=%s, step=%s)",
                     self._worker_id,
                     user_id,
                     spec.step_name,
-                    exc_info=True,
                 )
             finally:
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000, 3)
@@ -177,8 +171,6 @@ class WorkerVURuntime:
                 )
                 if not cancelled:
                     event_fields: dict[str, Any] = {"kind": "step"}
-                    if status_code is not None:
-                        event_fields["status_code"] = status_code
                     if not success:
                         event_fields["error"] = error_text or "step_error"
                     await emit_metric(

@@ -16,11 +16,12 @@ class WorkerMetricsPublisher:
         state_repo: WorkerStateRepository,
         *,
         worker_id: str,
-        metric_id: str,
+        metric_id: str | None,
     ) -> None:
         self._state_repo = state_repo
         self._worker_id = worker_id
-        self._metric_id = metric_id
+        normalized_fallback = (metric_id or "").strip()
+        self._fallback_metric_id = normalized_fallback or f"worker:{worker_id}"
 
     def bind_user(self, user_id: str) -> MetricEmitter:
         async def _emit(metric: dict[str, Any]) -> None:
@@ -29,6 +30,7 @@ class WorkerMetricsPublisher:
         return _emit
 
     async def emit_for_user(self, user_id: str, metric: dict[str, Any]) -> None:
+        metric_id = self._resolve_metric_id(metric)
         payload = {
             "ts_ms": int(time.time() * 1000),
             "worker_id": self._worker_id,
@@ -36,10 +38,18 @@ class WorkerMetricsPublisher:
             **metric,
         }
         try:
-            await self._state_repo.append_metric_event(self._metric_id, payload)
+            await self._state_repo.append_metric_event(metric_id, payload)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "failed to publish worker metric (worker_id=%s, metric_id=%s)",
                 self._worker_id,
-                self._metric_id,
+                metric_id,
             )
+
+    def _resolve_metric_id(self, metric: dict[str, Any]) -> str:
+        raw_name = metric.get("name")
+        if isinstance(raw_name, str):
+            normalized_name = raw_name.strip()
+            if normalized_name:
+                return normalized_name
+        return self._fallback_metric_id

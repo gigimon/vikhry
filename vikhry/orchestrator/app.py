@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import redis.asyncio as redis
 import uvloop
-from robyn import Robyn
+from robyn import ALLOW_CORS, Robyn
 
 from vikhry.orchestrator.api.routes import register_routes
 from vikhry.orchestrator.models.settings import OrchestratorSettings
@@ -38,6 +38,7 @@ class OrchestratorRuntime:
 
 def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntime]:
     app = Robyn(file_object=__file__)
+    ALLOW_CORS(app, origins="*", headers="*")
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     state_repo = TestStateRepository(redis_client)
     scenario_resource_names = load_resource_names_from_scenario(settings.scenario)
@@ -67,6 +68,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         state_repo=state_repo,
         user_orchestration=user_orchestration,
         resource_service=resource_service,
+        on_before_start_test=metrics_service.reset_for_new_run,
     )
     worker_monitor = WorkerMonitor(
         scan_interval_s=settings.worker_scan_interval_s,

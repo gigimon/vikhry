@@ -4,8 +4,6 @@ from typing import Any
 
 from vikhry import ReqwestClient, VU, between, resource, step
 
-BASE_URL = "http://localhost:8000"
-
 
 @resource(name="users")
 async def create_user_resource(resource_id: int | str, _ctx: object) -> dict[str, Any]:
@@ -29,7 +27,10 @@ async def create_session_resource(resource_id: int | str, _ctx: object) -> dict[
 
 
 class LocalhostDemoVU(VU):
-    http = ReqwestClient(base_url=BASE_URL, timeout=5.0)
+    http = ReqwestClient(timeout=5.0)
+
+    async def on_init(self, base_url: str) -> None:
+        self.http = self.http(base_url=base_url)
 
     async def on_start(self) -> None:
         self.user = await self.resources.acquire("users")

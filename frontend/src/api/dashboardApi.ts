@@ -54,7 +54,7 @@ export async function fetchWorkers(): Promise<WorkersResponse> {
 }
 
 export async function fetchMetrics(): Promise<MetricsResponse> {
-  return requestJson<MetricsResponse>('/metrics?count=200&include_events=false')
+  return requestJson<MetricsResponse>('/metrics?count=1&include_events=true')
 }
 
 export async function fetchResources(): Promise<ResourcesResponse> {
@@ -85,6 +85,16 @@ export async function stopTest(): Promise<void> {
       'content-type': 'application/json',
     },
     body: JSON.stringify({}),
+  })
+}
+
+export async function changeUsers(payload: { target_users: number }): Promise<void> {
+  await requestJson('/change_users', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(payload),
   })
 }
 

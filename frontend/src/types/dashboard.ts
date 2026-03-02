@@ -18,6 +18,9 @@ export interface WorkersResponse {
     heartbeat_age_s: number | null
     users_count: number
     cpu_percent?: number | null
+    process_ram_bytes?: number | null
+    total_ram_bytes?: number | null
+    // Backward compatibility with older orchestrator payloads.
     memory_percent?: number | null
     rss_bytes?: number | null
     cpu_load?: number | null
@@ -57,6 +60,7 @@ export interface MetricsResponse {
     metric_id: string
     last_event_id: string | null
     aggregate: MetricAggregate
+    aggregate_total: MetricAggregate
     events: Array<{
       event_id: string
       data: Record<string, unknown>
@@ -68,6 +72,7 @@ export interface MetricsResponse {
 
 export interface StatsRow {
   name: string
+  isNested?: boolean
   success: number
   failure: number
   medianMs: number | null
