@@ -26,6 +26,11 @@ class _FakeStateRepo:
             "w2": [],
             "w3": ["10"],
         }
+        self._worker_active_users = {
+            "w1": 1,
+            "w2": 0,
+            "w3": 0,
+        }
         self._resources = {
             "users": 10,
             "accounts": 3,
@@ -39,6 +44,9 @@ class _FakeStateRepo:
 
     async def list_worker_users(self, worker_id: str) -> list[str]:
         return list(self._worker_users.get(worker_id, []))
+
+    async def count_worker_active_users(self, worker_id: str) -> int:
+        return int(self._worker_active_users.get(worker_id, 0))
 
     async def list_resource_counters(self) -> dict[str, int]:
         return dict(self._resources)
@@ -76,6 +84,7 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": 95,
             "heartbeat_age_s": 5,
             "users_count": 2,
+            "active_users_count": 1,
             "cpu_percent": None,
             "process_ram_bytes": None,
             "total_ram_bytes": None,
@@ -86,6 +95,7 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": None,
             "heartbeat_age_s": None,
             "users_count": 0,
+            "active_users_count": 0,
             "cpu_percent": None,
             "process_ram_bytes": None,
             "total_ram_bytes": None,
@@ -96,6 +106,7 @@ async def test_build_workers_response_includes_status_heartbeat_and_user_counts_
             "last_heartbeat": 50,
             "heartbeat_age_s": 50,
             "users_count": 1,
+            "active_users_count": 0,
             "cpu_percent": None,
             "process_ram_bytes": None,
             "total_ram_bytes": None,

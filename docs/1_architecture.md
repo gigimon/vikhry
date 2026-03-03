@@ -31,6 +31,7 @@
    - `workers` - set всех `worker_id`
    - `worker:{worker_id}:commands` - pub/sub канал команд для конкретного worker
    - `worker:{worker_id}:users` - set назначенных пользователи для worker
+   - `worker:{worker_id}:active_users` - set пользователей, которые прошли `on_init/on_start` и реально выполняются
    - `worker:{worker_id}:status` - hash healthcheck: `status` (`healthy | unhealthy`), `last_heartbeat`
 5. Метрики
    - `metrics` - set названий метрик
@@ -85,6 +86,6 @@
 ## Остановка теста
 1. Оркестратор переводит тест в `STOPPING`.
 2. Отправляет `stop_test` каждому alive worker в его персональный канал.
-3. Очищает данные пользователей (`users`, `user:*`, `worker:*:users`).
+3. Очищает данные пользователей (`users`, `user:*`, `worker:*:users`, `worker:*:active_users`).
 4. Ресурсы не удаляются автоматически.
 5. Переводит `test:state` в `IDLE`.

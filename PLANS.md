@@ -232,3 +232,39 @@
 [ ] Добавить integration тесты orchestrator для расширенного контракта метрик и новых endpoints.
 [ ] Обновить `README.md` и `docs/5_ui.md` по фактической архитектуре и UX-flow.
 [ ] Добавить smoke-checklist запуска UI вместе с orchestrator/worker.
+
+# Error Telemetry v1 Description
+
+Цель: унифицировать обработку ошибок и исходов выполнения в едином потоке метрик, чтобы:
+- прозрачно видеть падения lifecycle (`on_init`, `on_start`) и исключения в step/runtime;
+- агрегировать результат выполнения по универсальным кодам исхода (`result_code`) без жесткого whitelist;
+- поддержать не только HTTP, но и будущие клиенты (например JsonRPC с ошибками в payload);
+- отобразить в UI breakdown по `result_code`/категориям без взрывного роста кардинальности.
+
+Принятые решения:
+- ошибки остаются в том же потоке, что и метрики (не в отдельном канале);
+- `result_code` — произвольная строка, но с нормализацией и ограничением длины/символов;
+- агрегатор считает top-K кодов + `OTHER`, чтобы сдерживать объем данных и сложность UI;
+- детальный stacktrace хранится в логах worker, в метриках — краткая выжимка (`error_type`, `error_message`).
+
+# Error Telemetry v1 Implementation
+
+## Step 28: Унифицированный контракт outcome-метрик
+[x] Расширить payload метрики полями: `source`, `stage`, `result_code`, `result_category`, `fatal`, `error_type`, `error_message`.
+[x] Реализовать нормализацию `result_code` (uppercase, безопасные символы, ограничение длины, fallback `UNKNOWN`).
+[x] Зафиксировать правила low-cardinality (без динамических идентификаторов и длинных текстов в `result_code`).
+[x] Добавить unit-тесты на валидацию/нормализацию и совместимость с существующими полями (`name`, `step`, `status`, `time`).
+
+## Step 29: Runtime-эмиттеры и backend-агрегация ошибок
+[x] В `run_user` добавить эмиссию lifecycle-метрик при падении `on_init`/`on_start` (`fatal=true`, без запуска step).
+[x] В step-метриках добавить outcome-коды (`STEP_OK`/`STEP_EXCEPTION`) и категории.
+[x] В HTTP-клиенте добавить унифицированные outcome-коды (`HTTP_<status>`, `HTTP_EXCEPTION`) и категории ошибок.
+[x] Расширить `MetricsService` новыми агрегатами: `result_code_counts`, `result_category_counts`, `fatal_count`, `top_result_codes` (+`OTHER`).
+[x] Обновить контракт `/metrics` и документацию `docs/contracts/v1.md`.
+
+## Step 30: UI breakdown и операционная видимость
+[ ] Добавить в UI блок breakdown по `result_code` и `result_category`.
+[ ] Добавить отдельный индикатор/блок для `fatal` lifecycle ошибок (`on_init`/`on_start`).
+[ ] Добавить переключение/фильтры для просмотра ошибок по source (`lifecycle`, `step`, `http`, будущие клиенты).
+[ ] Ограничить отображение редких кодов (top-K + `OTHER`) для стабильной читаемости.
+[ ] Добавить frontend и integration тесты на новые поля метрик и визуализацию breakdown.

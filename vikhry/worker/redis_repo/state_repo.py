@@ -23,6 +23,10 @@ class WorkerStateRepository:
         return f"worker:{worker_id}:users"
 
     @staticmethod
+    def worker_active_users_key(worker_id: str) -> str:
+        return f"worker:{worker_id}:active_users"
+
+    @staticmethod
     def worker_command_channel(worker_id: str) -> str:
         return f"worker:{worker_id}:commands"
 
@@ -50,7 +54,17 @@ class WorkerStateRepository:
         pipeline.srem("workers", worker_id)
         pipeline.delete(self.worker_status_key(worker_id))
         pipeline.delete(self.worker_users_key(worker_id))
+        pipeline.delete(self.worker_active_users_key(worker_id))
         await pipeline.execute()
+
+    async def add_worker_active_user(self, worker_id: str, user_id: int | str) -> None:
+        await self._redis.sadd(self.worker_active_users_key(worker_id), str(user_id))
+
+    async def remove_worker_active_user(self, worker_id: str, user_id: int | str) -> None:
+        await self._redis.srem(self.worker_active_users_key(worker_id), str(user_id))
+
+    async def clear_worker_active_users(self, worker_id: str) -> None:
+        await self._redis.delete(self.worker_active_users_key(worker_id))
 
     async def set_worker_health(
         self,

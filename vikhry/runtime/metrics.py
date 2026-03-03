@@ -3,25 +3,44 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from functools import wraps
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-MetricStatus = bool | Literal["ok", "error", "success", "failed"]
 MetricEmitter = Callable[[dict[str, Any]], Awaitable[None]]
 
 _UNSET: Final = object()
 _UNKNOWN_STEP: Final = "__unknown__"
-_REQUIRED_FIELDS: Final[tuple[str, ...]] = ("name", "step", "status", "time")
+_UNKNOWN_STAGE: Final = "unknown"
+_UNKNOWN_SOURCE: Final = "unknown"
+_UNKNOWN_RESULT_CODE: Final = "UNKNOWN"
+_UNKNOWN_RESULT_CATEGORY: Final = "unknown"
+_MAX_RESULT_TOKEN_LENGTH: Final = 64
+_MAX_ERROR_MESSAGE_LENGTH: Final = 256
+_TOKEN_SANITIZE_PATTERN: Final = re.compile(r"[^A-Z0-9_:-]+")
+_CATEGORY_SANITIZE_PATTERN: Final = re.compile(r"[^a-z0-9_:-]+")
+_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "step",
+    "status",
+    "time",
+    "source",
+    "stage",
+    "result_code",
+    "result_category",
+    "fatal",
+)
 _metric_emitter_var: ContextVar[MetricEmitter | None] = ContextVar(
     "vikhry_metric_emitter", default=None
 )
 _metric_step_var: ContextVar[str | None] = ContextVar("vikhry_metric_step", default=None)
+_metric_stage_var: ContextVar[str | None] = ContextVar("vikhry_metric_stage", default=None)
 
 
 @contextmanager
@@ -29,18 +48,24 @@ def metric_scope(
     *,
     emitter: MetricEmitter | None | object = _UNSET,
     step: str | None | object = _UNSET,
+    stage: str | None | object = _UNSET,
 ) -> Iterator[None]:
     emitter_token: Token[MetricEmitter | None] | None = None
     step_token: Token[str | None] | None = None
+    stage_token: Token[str | None] | None = None
 
     if emitter is not _UNSET:
         emitter_token = _metric_emitter_var.set(emitter)
     if step is not _UNSET:
         step_token = _metric_step_var.set(_normalize_metric_step(step))
+    if stage is not _UNSET:
+        stage_token = _metric_stage_var.set(_normalize_stage(stage))
 
     try:
         yield
     finally:
+        if stage_token is not None:
+            _metric_stage_var.reset(stage_token)
         if step_token is not None:
             _metric_step_var.reset(step_token)
         if emitter_token is not None:
@@ -50,9 +75,16 @@ def metric_scope(
 async def emit_metric(
     *,
     name: str,
-    status: MetricStatus,
+    status: bool,
     time: float,
+    source: str,
+    stage: str | None = None,
+    result_code: str,
+    result_category: str,
+    fatal: bool = False,
     step: str | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
     **fields: Any,
 ) -> bool:
     emitter = _metric_emitter_var.get()
@@ -64,6 +96,13 @@ async def emit_metric(
         step=step if step is not None else _metric_step_var.get(),
         status=status,
         time=time,
+        source=source,
+        stage=stage if stage is not None else _metric_stage_var.get(),
+        result_code=result_code,
+        result_category=result_category,
+        fatal=fatal,
+        error_type=error_type,
+        error_message=error_message,
         **fields,
     )
     await emitter(payload)
@@ -73,6 +112,13 @@ async def emit_metric(
 def metric(
     *,
     name: str | None = None,
+    source: str = "custom",
+    stage: str = "execute",
+    success_result_code: str = "METRIC_OK",
+    success_result_category: str = "ok",
+    failure_result_code: str = "METRIC_EXCEPTION",
+    failure_result_category: str = "exception",
+    fatal: bool = False,
     **fields: Any,
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -86,11 +132,18 @@ def metric(
                 result = await func(*args, **kwargs)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 await _safe_emit(
                     metric_name=name or func.__name__,
                     status=False,
                     elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                    source=source,
+                    stage=stage,
+                    result_code=failure_result_code,
+                    result_category=failure_result_category,
+                    fatal=fatal,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
                     fields=fields,
                 )
                 raise
@@ -99,6 +152,11 @@ def metric(
                 metric_name=name or func.__name__,
                 status=True,
                 elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                source=source,
+                stage=stage,
+                result_code=success_result_code,
+                result_category=success_result_category,
+                fatal=fatal,
                 fields=fields,
             )
             return result
@@ -112,8 +170,15 @@ def build_metric_payload(
     *,
     name: str,
     step: str | None,
-    status: MetricStatus,
+    status: bool,
     time: float,
+    source: str,
+    stage: str | None,
+    result_code: str,
+    result_category: str,
+    fatal: bool,
+    error_type: str | None = None,
+    error_message: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
     for required_field in _REQUIRED_FIELDS:
@@ -124,6 +189,10 @@ def build_metric_payload(
     normalized_step = _normalize_metric_step(step)
     normalized_status = _normalize_metric_status(status)
     normalized_time = float(time)
+    normalized_source = _normalize_source(source)
+    normalized_stage = _normalize_stage(stage)
+    normalized_result_code = normalize_result_code(result_code)
+    normalized_result_category = _normalize_result_category(result_category)
     if normalized_time < 0:
         raise ValueError("metric time must be >= 0")
 
@@ -132,7 +201,16 @@ def build_metric_payload(
         "step": normalized_step,
         "status": normalized_status,
         "time": normalized_time,
+        "source": normalized_source,
+        "stage": normalized_stage,
+        "result_code": normalized_result_code,
+        "result_category": normalized_result_category,
+        "fatal": bool(fatal),
     }
+    if error_type is not None:
+        payload["error_type"] = _normalize_error_type(error_type)
+    if error_message is not None:
+        payload["error_message"] = _normalize_error_message(error_message)
     payload.update(fields)
     return payload
 
@@ -156,6 +234,13 @@ async def _safe_emit(
     metric_name: str,
     status: bool,
     elapsed_ms: float,
+    source: str,
+    stage: str,
+    result_code: str,
+    result_category: str,
+    fatal: bool,
+    error_type: str | None = None,
+    error_message: str | None = None,
     fields: dict[str, Any],
 ) -> None:
     try:
@@ -163,6 +248,13 @@ async def _safe_emit(
             name=metric_name,
             status=status,
             time=round(elapsed_ms, 3),
+            source=source,
+            stage=stage,
+            result_code=result_code,
+            result_category=result_category,
+            fatal=fatal,
+            error_type=error_type,
+            error_message=error_message,
             **fields,
         )
     except Exception:  # noqa: BLE001
@@ -185,13 +277,64 @@ def _normalize_metric_step(step: str | None | object) -> str:
     return normalized
 
 
-def _normalize_metric_status(status: MetricStatus) -> bool:
+def _normalize_metric_status(status: bool) -> bool:
     if isinstance(status, bool):
         return status
-    normalized = str(status).strip().lower()
-    if normalized in {"ok", "success"}:
-        return True
-    if normalized in {"error", "failed"}:
-        return False
-    raise ValueError("metric status must be bool or one of: ok,error,success,failed")
+    raise ValueError("metric status must be bool")
 
+
+def _normalize_source(source: str) -> str:
+    normalized = str(source).strip().lower()
+    if not normalized:
+        return _UNKNOWN_SOURCE
+    return normalized
+
+
+def _normalize_stage(stage: str | None | object) -> str:
+    if stage is None:
+        return _UNKNOWN_STAGE
+    normalized = str(stage).strip().lower()
+    if not normalized:
+        return _UNKNOWN_STAGE
+    return normalized
+
+
+def normalize_result_code(value: object) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return _UNKNOWN_RESULT_CODE
+    sanitized = _TOKEN_SANITIZE_PATTERN.sub("_", raw).strip("_")
+    if not sanitized:
+        return _UNKNOWN_RESULT_CODE
+    return sanitized[:_MAX_RESULT_TOKEN_LENGTH]
+
+
+def _normalize_result_category(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return _UNKNOWN_RESULT_CATEGORY
+    sanitized = _CATEGORY_SANITIZE_PATTERN.sub("_", raw).strip("_")
+    if not sanitized:
+        return _UNKNOWN_RESULT_CATEGORY
+    return sanitized[:_MAX_RESULT_TOKEN_LENGTH]
+
+
+def _normalize_error_type(value: object) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "UnknownError"
+    return normalized[:_MAX_RESULT_TOKEN_LENGTH]
+
+
+def _normalize_error_message(value: object) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    return normalized[:_MAX_ERROR_MESSAGE_LENGTH]
+
+
+def exception_fields(exc: BaseException) -> dict[str, str]:
+    return {
+        "error_type": type(exc).__name__,
+        "error_message": _normalize_error_message(str(exc)),
+    }

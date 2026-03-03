@@ -17,14 +17,10 @@ export interface WorkersResponse {
     last_heartbeat: number | null
     heartbeat_age_s: number | null
     users_count: number
-    cpu_percent?: number | null
-    process_ram_bytes?: number | null
-    total_ram_bytes?: number | null
-    // Backward compatibility with older orchestrator payloads.
-    memory_percent?: number | null
-    rss_bytes?: number | null
-    cpu_load?: number | null
-    ram_load?: number | null
+    active_users_count: number
+    cpu_percent: number | null
+    process_ram_bytes: number | null
+    total_ram_bytes: number | null
   }>
 }
 
@@ -47,6 +43,13 @@ export interface MetricAggregate {
   latency_median_ms: number | null
   latency_p95_ms: number | null
   latency_p99_ms: number | null
+  result_code_counts: Record<string, number>
+  result_category_counts: Record<string, number>
+  fatal_count: number
+  top_result_codes: Array<{
+    result_code: string
+    count: number
+  }>
 }
 
 export interface MetricsResponse {

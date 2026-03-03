@@ -43,8 +43,12 @@ async def test_http_client_emits_metric_with_path_name_spec() -> None:
     assert captured[0]["name"] == "/page1"
     assert captured[0]["step"] == "ping"
     assert captured[0]["status"] is True
+    assert captured[0]["source"] == "http"
+    assert captured[0]["stage"] == "execute"
+    assert captured[0]["result_code"] == "HTTP_204"
+    assert captured[0]["result_category"] == "ok"
+    assert captured[0]["fatal"] is False
     assert captured[0]["method"] == "GET"
-    assert captured[0]["kind"] == "http"
     assert captured[0]["status_code"] == 204
 
 
@@ -65,6 +69,11 @@ async def test_http_client_emits_failed_metric_on_exception_spec() -> None:
     assert captured[0]["name"] == "/auth"
     assert captured[0]["step"] == "ping"
     assert captured[0]["status"] is False
+    assert captured[0]["source"] == "http"
+    assert captured[0]["stage"] == "execute"
+    assert captured[0]["result_code"] == "HTTP_EXCEPTION"
+    assert captured[0]["result_category"] == "transport_error"
+    assert captured[0]["fatal"] is False
     assert captured[0]["method"] == "POST"
-    assert "error" in captured[0]
-
+    assert captured[0]["error_type"] == "RuntimeError"
+    assert captured[0]["error_message"] == "boom"

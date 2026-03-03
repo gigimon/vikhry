@@ -19,6 +19,7 @@ from vikhry.worker.services.command_dispatcher import WorkerCommandDispatcher
 class _FakeWorkerStateRepo:
     def __init__(self) -> None:
         self.raise_decode_error = False
+        self.active_users: set[str] = set()
 
     def decode_command(self, raw: bytes | bytearray | memoryview | str) -> CommandEnvelope:
         if self.raise_decode_error:
@@ -28,6 +29,12 @@ class _FakeWorkerStateRepo:
     @staticmethod
     def worker_command_channel(worker_id: str) -> str:
         return f"worker:{worker_id}:commands"
+
+    async def remove_worker_active_user(self, _worker_id: str, user_id: int | str) -> None:
+        self.active_users.discard(str(user_id))
+
+    async def clear_worker_active_users(self, _worker_id: str) -> None:
+        self.active_users.clear()
 
 
 def _command(
@@ -49,8 +56,9 @@ def _command(
 @pytest.mark.asyncio
 async def test_dispatcher_happy_path_idempotent_user_ops_spec() -> None:
     state = WorkerRuntimeState()
+    repo = _FakeWorkerStateRepo()
     dispatcher = WorkerCommandDispatcher(
-        _FakeWorkerStateRepo(),  # type: ignore[arg-type]
+        repo,  # type: ignore[arg-type]
         worker_id="w1",
         runtime_state=state,
     )
@@ -109,6 +117,7 @@ async def test_dispatcher_happy_path_idempotent_user_ops_spec() -> None:
         )
     )
     assert state.assigned_users == {"2"}
+    assert repo.active_users == set()
 
     await dispatcher._handle_command(  # noqa: SLF001
         _command(
@@ -125,8 +134,9 @@ async def test_dispatcher_happy_path_idempotent_user_ops_spec() -> None:
 @pytest.mark.asyncio
 async def test_dispatcher_epoch_gating_and_reset_on_new_start_spec() -> None:
     state = WorkerRuntimeState()
+    repo = _FakeWorkerStateRepo()
     dispatcher = WorkerCommandDispatcher(
-        _FakeWorkerStateRepo(),  # type: ignore[arg-type]
+        repo,  # type: ignore[arg-type]
         worker_id="w1",
         runtime_state=state,
     )
@@ -168,6 +178,7 @@ async def test_dispatcher_epoch_gating_and_reset_on_new_start_spec() -> None:
     assert state.phase == WorkerPhase.RUNNING
     assert state.current_epoch == 2
     assert state.assigned_users == {"10"}
+    repo.active_users = {"10"}
 
     await dispatcher._handle_command(  # noqa: SLF001
         _command(
@@ -180,6 +191,7 @@ async def test_dispatcher_epoch_gating_and_reset_on_new_start_spec() -> None:
     assert state.phase == WorkerPhase.RUNNING
     assert state.current_epoch == 3
     assert state.assigned_users == set()
+    assert repo.active_users == set()
 
 
 @pytest.mark.asyncio
@@ -215,8 +227,9 @@ async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec()
             raise
 
     state = WorkerRuntimeState()
+    repo = _FakeWorkerStateRepo()
     dispatcher = WorkerCommandDispatcher(
-        _FakeWorkerStateRepo(),  # type: ignore[arg-type]
+        repo,  # type: ignore[arg-type]
         worker_id="w1",
         runtime_state=state,
         user_task_factory=user_runtime,
@@ -242,6 +255,7 @@ async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec()
     await asyncio.wait_for(started.wait(), timeout=1.0)
     assert "1" in state.user_tasks
     assert seen_init_params == {"tenant": "demo"}
+    repo.active_users = {"1"}
 
     await dispatcher._handle_command(  # noqa: SLF001
         _command(
@@ -253,3 +267,4 @@ async def test_dispatcher_starts_and_stops_user_task_with_runtime_factory_spec()
     )
     await asyncio.wait_for(cancelled.wait(), timeout=1.0)
     assert "1" not in state.user_tasks
+    assert repo.active_users == set()

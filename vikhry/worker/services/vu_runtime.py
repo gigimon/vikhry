@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from vikhry.runtime import VU, bind_steps, resolve_every_delay
-from vikhry.runtime.metrics import emit_metric, metric_scope
+from vikhry.runtime.metrics import emit_metric, exception_fields, metric_scope
 from vikhry.runtime.strategy import SequentialWeightedStrategy, StepStrategy
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
 from vikhry.worker.services.metrics import WorkerMetricsPublisher
@@ -63,15 +63,32 @@ class WorkerVURuntime:
         rng = random.Random(f"{self._worker_id}:{user_id}")
         steps = bind_steps(vu)
         step_strategy = _resolve_step_strategy(vu.step_strategy)
+        user_is_active = False
 
         try:
             with metric_scope(emitter=user_metric_emitter):
-                if init_kwargs:
-                    await vu.on_init(**init_kwargs)
-                else:
-                    await vu.on_init()
+                try:
+                    with metric_scope(stage="on_init"):
+                        if init_kwargs:
+                            await vu.on_init(**init_kwargs)
+                        else:
+                            await vu.on_init()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    await self._emit_lifecycle_failure(stage="on_init", error=exc)
+                    raise
                 vu.ensure_http_client()
-                await vu.on_start()
+                try:
+                    with metric_scope(stage="on_start"):
+                        await vu.on_start()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    await self._emit_lifecycle_failure(stage="on_start", error=exc)
+                    raise
+                await self._state_repo.add_worker_active_user(self._worker_id, user_id)
+                user_is_active = True
                 while True:
                     now = time.monotonic()
                     selection = step_strategy.select(
@@ -115,6 +132,8 @@ class WorkerVURuntime:
             raise
         finally:
             try:
+                if user_is_active:
+                    await self._state_repo.remove_worker_active_user(self._worker_id, user_id)
                 await vu.on_stop()
             finally:
                 await vu.close()
@@ -129,7 +148,8 @@ class WorkerVURuntime:
     ) -> None:
         spec = bound_step.spec
         started_at = time.perf_counter()
-        error_text: str | None = None
+        error_type: str | None = None
+        error_message: str | None = None
         success = False
         cancelled = False
 
@@ -146,7 +166,9 @@ class WorkerVURuntime:
                 cancelled = True
                 raise
             except Exception as exc:  # noqa: BLE001
-                error_text = f"{type(exc).__name__}: {exc}"
+                error_payload = exception_fields(exc)
+                error_type = error_payload["error_type"]
+                error_message = error_payload["error_message"]
                 logger.exception(
                     "VU step raised exception (worker_id=%s, user_id=%s, step=%s)",
                     self._worker_id,
@@ -170,15 +192,39 @@ class WorkerVURuntime:
                     time.monotonic() + every_delay if every_delay > 0 else 0.0
                 )
                 if not cancelled:
-                    event_fields: dict[str, Any] = {"kind": "step"}
-                    if not success:
-                        event_fields["error"] = error_text or "step_error"
                     await emit_metric(
                         name=spec.step_name,
                         status=success,
                         time=elapsed_ms,
-                        **event_fields,
+                        source="step",
+                        stage="execute",
+                        result_code="STEP_OK" if success else "STEP_EXCEPTION",
+                        result_category="ok" if success else "exception",
+                        fatal=False,
+                        error_type=error_type,
+                        error_message=error_message,
                     )
+
+    async def _emit_lifecycle_failure(self, *, stage: str, error: Exception) -> None:
+        payload = exception_fields(error)
+        logger.exception(
+            "VU lifecycle hook failed (worker_id=%s, stage=%s)",
+            self._worker_id,
+            stage,
+        )
+        await emit_metric(
+            name=f"lifecycle/{stage}",
+            step=stage,
+            status=False,
+            time=0.0,
+            source="lifecycle",
+            stage=stage,
+            result_code="LIFECYCLE_EXCEPTION",
+            result_category="exception",
+            fatal=True,
+            error_type=payload["error_type"],
+            error_message=payload["error_message"],
+        )
 
 
 def _resolve_step_strategy(candidate: object) -> StepStrategy[Any]:

@@ -18,6 +18,7 @@ class _FakeRepo:
         self.metric_events: list[tuple[str, dict[str, Any]]] = []
         self.acquired_resource_names: list[str] = []
         self.released_resources: list[tuple[str, str]] = []
+        self.active_users: set[str] = set()
 
     async def append_metric_event(self, metric_id: str, event: dict[str, Any]) -> str:
         self.metric_events.append((metric_id, event))
@@ -29,6 +30,12 @@ class _FakeRepo:
 
     async def release_resource(self, resource_name: str, resource_id: int | str) -> None:
         self.released_resources.append((resource_name, str(resource_id)))
+
+    async def add_worker_active_user(self, _worker_id: str, user_id: int | str) -> None:
+        self.active_users.add(str(user_id))
+
+    async def remove_worker_active_user(self, _worker_id: str, user_id: int | str) -> None:
+        self.active_users.discard(str(user_id))
 
 
 async def _wait_until(predicate: Callable[[], bool], timeout_s: float = 1.5) -> None:
@@ -104,7 +111,17 @@ class _ManualMetricVU(VU):
     @step(every_s=0.01)
     async def ping(self) -> None:
         await self.helper()
-        await emit_metric(name="/auth", status=True, time=1.23, method="POST")
+        await emit_metric(
+            name="/auth",
+            status=True,
+            time=1.23,
+            source="http",
+            stage="execute",
+            result_code="HTTP_200",
+            result_category="ok",
+            fatal=False,
+            method="POST",
+        )
         await asyncio.sleep(0)
 
 
@@ -164,11 +181,13 @@ async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
 
     task = asyncio.create_task(runtime.run_user("user-1"))
     await _wait_until(lambda: len(repo.metric_events) >= 2)
+    assert "user-1" in repo.active_users
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 
     assert "user-1" in _MetricsVU.started
     assert "user-1" in _MetricsVU.stopped
+    assert "user-1" not in repo.active_users
     assert repo.acquired_resource_names == ["users"]
     assert repo.released_resources == [("users", "42")]
     assert all(metric_id == "ping" for metric_id, _ in repo.metric_events)
@@ -178,8 +197,13 @@ async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     assert first_event["name"] == "ping"
     assert first_event["step"] == "ping"
     assert first_event["status"] is True
+    assert first_event["source"] == "step"
+    assert first_event["stage"] == "execute"
+    assert first_event["result_code"] == "STEP_OK"
+    assert first_event["result_category"] == "ok"
+    assert first_event["fatal"] is False
     assert "time" in first_event
-    assert "error" not in first_event
+    assert "error_message" not in first_event
 
 
 def test_load_vu_type_resolves_valid_path_spec() -> None:
@@ -256,6 +280,8 @@ async def test_runtime_supports_manual_and_decorator_metrics_spec() -> None:
     assert all(metric_id == event["name"] for metric_id, event in repo.metric_events)
     assert by_name["/auth"]["step"] == "ping"
     assert by_name["/auth"]["status"] is True
+    assert by_name["/auth"]["source"] == "http"
+    assert by_name["/auth"]["result_code"] == "HTTP_200"
     assert by_name["/auth"]["method"] == "POST"
     assert by_name["helper_prepare"]["component"] == "auth"
 
@@ -281,7 +307,8 @@ async def test_runtime_ignores_step_result_status_like_field_spec(
     first_event = repo.metric_events[0][1]
     assert first_event["name"] == "ping"
     assert first_event["status"] is True
-    assert "error" not in first_event
+    assert first_event["result_code"] == "STEP_OK"
+    assert "error_message" not in first_event
     assert not any("returned error status" in record.getMessage() for record in caplog.records)
 
 
@@ -302,6 +329,10 @@ async def test_runtime_logs_error_for_step_exception_spec(caplog: pytest.LogCapt
     await asyncio.gather(task, return_exceptions=True)
 
     assert any("raised exception" in record.getMessage() for record in caplog.records)
+    assert any(
+        event["result_code"] == "STEP_EXCEPTION" and event["status"] is False
+        for _, event in repo.metric_events
+    )
 
 
 @pytest.mark.asyncio
@@ -319,7 +350,15 @@ async def test_runtime_does_not_run_steps_when_on_init_fails_spec() -> None:
         await runtime.run_user("user-1")
 
     assert _InitFailVU.step_calls == 0
-    assert repo.metric_events == []
+    assert len(repo.metric_events) == 1
+    metric_id, event = repo.metric_events[0]
+    assert metric_id == "lifecycle/on_init"
+    assert event["source"] == "lifecycle"
+    assert event["stage"] == "on_init"
+    assert event["result_code"] == "LIFECYCLE_EXCEPTION"
+    assert event["result_category"] == "exception"
+    assert event["fatal"] is True
+    assert repo.active_users == set()
 
 
 @pytest.mark.asyncio
@@ -337,4 +376,12 @@ async def test_runtime_does_not_run_steps_when_on_start_fails_spec() -> None:
         await runtime.run_user("user-1")
 
     assert _StartFailVU.step_calls == 0
-    assert repo.metric_events == []
+    assert len(repo.metric_events) == 1
+    metric_id, event = repo.metric_events[0]
+    assert metric_id == "lifecycle/on_start"
+    assert event["source"] == "lifecycle"
+    assert event["stage"] == "on_start"
+    assert event["result_code"] == "LIFECYCLE_EXCEPTION"
+    assert event["result_category"] == "exception"
+    assert event["fatal"] is True
+    assert repo.active_users == set()

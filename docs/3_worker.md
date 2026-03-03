@@ -9,6 +9,7 @@ Worker реализует control-plane и runtime VU:
 - последовательная обработка `start_test/stop_test/add_user/remove_user`;
 - локальное состояние (`phase`, `current_epoch`, `assigned_users`, `user_tasks`);
 - запуск VU-задач по `add_user` и остановка по `remove_user`/`stop_test`;
+- публикация активных пользователей в `worker:{worker_id}:active_users` после успешных `on_init/on_start`;
 - публикация step-событий в `metric:worker:{worker_id}`;
 - CLI управление процессом (`start/stop`, detach/foreground).
 
@@ -85,6 +86,8 @@ Worker обновляет hash:
 - `start_test`: переход в `RUNNING` и переключение epoch;
 - `add_user`: добавляет `user_id` в локальный набор и поднимает task с VU loop;
 - `remove_user`: удаляет `user_id` из локального набора и останавливает его VU task;
+- при успешном старте VU (`on_init` + `on_start`) `user_id` добавляется в `worker:{worker_id}:active_users`;
+- при `remove_user`, завершении задачи VU или `stop_test` `user_id` удаляется из `worker:{worker_id}:active_users`;
 - `stop_test`: `STOPPING -> IDLE`, очистка локального состояния.
 
 ## Логи worker

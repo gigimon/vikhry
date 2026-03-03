@@ -5,7 +5,6 @@ import {
   Gauge,
   Layers,
   Play,
-  RefreshCcw,
   Square,
   Users,
   X,
@@ -44,8 +43,9 @@ import type {
 } from '../types/dashboard'
 
 const REFRESH_INTERVAL_MS = 2_000
+const ERROR_EVENTS_FETCH_COUNT = 1000
 
-type TabId = 'statistics' | 'charts' | 'resources' | 'workers'
+type TabId = 'statistics' | 'charts' | 'errors' | 'resources' | 'workers'
 type StatsScope = 'window' | 'total'
 type StatsColumnId =
   | 'name'
@@ -73,9 +73,39 @@ interface NotificationItem {
   message: string
 }
 
+interface SourceBreakdownRow {
+  source: string
+  requests: number
+  errors: number
+  fatal: number
+}
+
+interface ErrorBreakdownSnapshot {
+  totalRequests: number
+  totalErrors: number
+  totalFatal: number
+  resultCodeRows: Array<{ label: string; count: number }>
+  resultCategoryRows: Array<{ label: string; count: number }>
+  sourceRows: SourceBreakdownRow[]
+}
+
+interface TracebackRow {
+  key: string
+  metricId: string
+  source: string
+  stage: string
+  category: string
+  errorType: string | null
+  errorMessage: string | null
+  traceback: string
+  eventId: string
+  timestampMs: number | null
+}
+
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'statistics', label: 'Statistics' },
   { id: 'charts', label: 'Charts' },
+  { id: 'errors', label: 'Errors' },
   { id: 'resources', label: 'Resources' },
   { id: 'workers', label: 'Workers' },
 ]
@@ -173,18 +203,77 @@ function latestMetricEventData(metric: MetricsResponse['metrics'][number]): Reco
 
 function metricKind(metric: MetricsResponse['metrics'][number]): string | null {
   const data = latestMetricEventData(metric)
-  return normalizedString(data?.kind) ?? null
+  return normalizedString(data?.source) ?? null
 }
 
 function isHttpMetric(metric: MetricsResponse['metrics'][number]): boolean {
   const kind = metricKind(metric)
-  if (kind === 'http') {
-    return true
+  return kind === 'http'
+}
+
+function metricSource(metric: MetricsResponse['metrics'][number]): string {
+  return metricKind(metric) ?? 'unknown'
+}
+
+function sortCountRows(values: Record<string, number>): Array<{ label: string; count: number }> {
+  return Object.entries(values)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }))
+    .map(([label, count]) => ({ label, count }))
+}
+
+function mergeCountMap(target: Record<string, number>, source: Record<string, number>): void {
+  for (const [label, count] of Object.entries(source)) {
+    if (!Number.isFinite(count) || count <= 0) {
+      continue
+    }
+    target[label] = (target[label] ?? 0) + count
   }
-  if (kind === null) {
-    return metric.metric_id.startsWith('/')
+}
+
+function parseStreamEventTimestampMs(eventId: string): number | null {
+  const rawTimestamp = eventId.split('-', 1)[0]
+  const parsed = Number.parseInt(rawTimestamp, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null
   }
-  return false
+  return parsed
+}
+
+function formatEventTimestamp(value: number | null): string {
+  if (value === null) {
+    return '—'
+  }
+  return new Date(value).toLocaleString('en-US', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function readErrorTraceback(data: Record<string, unknown>): string | null {
+  const tracebackFields = [
+    'traceback',
+    'stacktrace',
+    'stack_trace',
+    'exception_traceback',
+    'error_traceback',
+  ] as const
+
+  for (const field of tracebackFields) {
+    const raw = data[field]
+    if (typeof raw !== 'string') {
+      continue
+    }
+    const value = raw.trim()
+    if (value.length > 0) {
+      return value
+    }
+  }
+  return null
 }
 
 function toStatsRows(metrics: MetricsResponse | null, scope: StatsScope): StatsRow[] {
@@ -313,12 +402,33 @@ function aggregateLatencyByRps(
   return roundTo(weightedSum / totalWeight)
 }
 
+function resolveWorkerActiveUsersCount(worker: WorkersResponse['workers'][number]): number {
+  return Math.max(0, Math.floor(worker.active_users_count))
+}
+
+function sumUsersForActiveWorkers(
+  workers: WorkersResponse,
+  activeWorkerIds: readonly string[] | null,
+): number {
+  if (!activeWorkerIds) {
+    return 0
+  }
+  const activeSet = new Set(activeWorkerIds)
+  return workers.workers.reduce((total, worker) => {
+    if (!activeSet.has(worker.worker_id)) {
+      return total
+    }
+    return total + resolveWorkerActiveUsersCount(worker)
+  }, 0)
+}
+
 function buildHistoryPoint(
   metrics: MetricsResponse,
   workers: WorkersResponse,
+  activeWorkerIds: readonly string[] | null,
   generatedAt: number,
 ): ChartHistoryPoint {
-  const totalUsers = workers.workers.reduce((total, worker) => total + worker.users_count, 0)
+  const totalUsers = sumUsersForActiveWorkers(workers, activeWorkerIds)
   const rpsByMetric: Record<string, number> = {}
   for (const metric of metrics.metrics) {
     rpsByMetric[metric.metric_id] = roundTo(metric.aggregate.rps)
@@ -426,7 +536,7 @@ function workerBadge(
   return { label: 'Degraded', tone: 'degraded' }
 }
 
-function useDashboardData() {
+function useDashboardData(metricsEventsCount: number) {
   const [ready, setReady] = useState<ReadyResponse | null>(null)
   const [workers, setWorkers] = useState<WorkersResponse | null>(null)
   const [resources, setResources] = useState<ResourcesResponse | null>(null)
@@ -449,7 +559,10 @@ function useDashboardData() {
       fetchReady(),
       fetchWorkers(),
       fetchResources(),
-      fetchMetrics(),
+      fetchMetrics({
+        count: metricsEventsCount,
+        includeEvents: true,
+      }),
     ])
 
     const errors: string[] = []
@@ -488,7 +601,8 @@ function useDashboardData() {
         metricsResult.value.generated_at > 0
           ? metricsResult.value.generated_at
           : Math.floor(Date.now() / 1000)
-      const point = buildHistoryPoint(metricsResult.value, workersResult.value, ts)
+      const activeWorkerIds = readyResult.status === 'fulfilled' ? readyResult.value.workers : null
+      const point = buildHistoryPoint(metricsResult.value, workersResult.value, activeWorkerIds, ts)
       setHistory((current) => {
         const merged =
           current.length > 0 && current[current.length - 1].ts === point.ts
@@ -502,7 +616,7 @@ function useDashboardData() {
     setLoading(false)
     setRefreshing(false)
     inFlightRef.current = false
-  }, [])
+  }, [metricsEventsCount])
 
   useEffect(() => {
     const initialTimerId = window.setTimeout(() => {
@@ -534,8 +648,11 @@ function useDashboardData() {
 export function LoadTestingScreen() {
   const [activeTab, setActiveTab] = useState<TabId>('statistics')
   const [statsScope, setStatsScope] = useState<StatsScope>('window')
+  const [selectedSources, setSelectedSources] = useState<string[]>([])
   const [visibleColumns, setVisibleColumns] = useState<StatsColumnId[]>(defaultVisibleColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
+  const [sourcesOpen, setSourcesOpen] = useState(false)
+  const [errorsCategoryOpen, setErrorsCategoryOpen] = useState(false)
 
   const [startModalOpen, setStartModalOpen] = useState(false)
   const [changeUsersModalOpen, setChangeUsersModalOpen] = useState(false)
@@ -567,11 +684,15 @@ export function LoadTestingScreen() {
   const [scenarioLoading, setScenarioLoading] = useState(false)
   const [scenarioError, setScenarioError] = useState<string | null>(null)
   const [initParamValues, setInitParamValues] = useState<Record<string, string>>({})
+  const [selectedTracebackCategory, setSelectedTracebackCategory] = useState('all')
 
   const columnsContainerRef = useRef<HTMLDivElement | null>(null)
+  const sourcesContainerRef = useRef<HTMLDivElement | null>(null)
+  const errorsCategoryContainerRef = useRef<HTMLDivElement | null>(null)
   const notificationIdRef = useRef(0)
   const notificationTimersRef = useRef<Map<number, number>>(new Map())
   const lastFetchErrorRef = useRef<string | null>(null)
+  const metricsEventsCount = activeTab === 'errors' ? ERROR_EVENTS_FETCH_COUNT : 1
 
   const {
     ready,
@@ -579,10 +700,9 @@ export function LoadTestingScreen() {
     resources,
     metrics,
     history,
-    refreshing,
     error,
     refresh,
-  } = useDashboardData()
+  } = useDashboardData(metricsEventsCount)
 
   const dismissNotification = useCallback((id: number) => {
     const timerId = notificationTimersRef.current.get(id)
@@ -615,12 +735,23 @@ export function LoadTestingScreen() {
 
   const rows = useMemo(() => toStatsRows(metrics, statsScope), [metrics, statsScope])
 
+  const availableSources = useMemo(() => {
+    if (!metrics) {
+      return []
+    }
+    const sourceSet = new Set<string>()
+    for (const metric of metrics.metrics) {
+      sourceSet.add(metricSource(metric))
+    }
+    return Array.from(sourceSet).sort((a, b) => a.localeCompare(b))
+  }, [metrics])
+
   const totalUsers = useMemo(() => {
-    if (!workers) {
+    if (!workers || !ready) {
       return 0
     }
-    return workers.workers.reduce((total, worker) => total + worker.users_count, 0)
-  }, [workers])
+    return sumUsersForActiveWorkers(workers, ready.workers)
+  }, [ready, workers])
 
   const totalRps = useMemo(() => {
     if (!metrics) {
@@ -634,6 +765,171 @@ export function LoadTestingScreen() {
     }, 0)
   }, [metrics])
 
+  const errorBreakdown = useMemo<ErrorBreakdownSnapshot>(() => {
+    const empty: ErrorBreakdownSnapshot = {
+      totalRequests: 0,
+      totalErrors: 0,
+      totalFatal: 0,
+      resultCodeRows: [],
+      resultCategoryRows: [],
+      sourceRows: [],
+    }
+    if (!metrics) {
+      return empty
+    }
+
+    const activeSourceSet = new Set(
+      selectedSources.length > 0 ? selectedSources : availableSources,
+    )
+    const resultCodeCounts: Record<string, number> = {}
+    const resultCategoryCounts: Record<string, number> = {}
+    const sourceTotals = new Map<string, SourceBreakdownRow>()
+    let totalRequests = 0
+    let totalErrors = 0
+    let totalFatal = 0
+
+    for (const metric of metrics.metrics) {
+      const source = metricSource(metric)
+      if (activeSourceSet.size > 0 && !activeSourceSet.has(source)) {
+        continue
+      }
+
+      const aggregate = statsScope === 'total' ? metric.aggregate_total : metric.aggregate
+      totalRequests += aggregate.requests
+      totalErrors += aggregate.errors
+      totalFatal += aggregate.fatal_count
+      mergeCountMap(resultCodeCounts, aggregate.result_code_counts)
+      mergeCountMap(resultCategoryCounts, aggregate.result_category_counts)
+
+      const currentSource = sourceTotals.get(source) ?? {
+        source,
+        requests: 0,
+        errors: 0,
+        fatal: 0,
+      }
+      currentSource.requests += aggregate.requests
+      currentSource.errors += aggregate.errors
+      currentSource.fatal += aggregate.fatal_count
+      sourceTotals.set(source, currentSource)
+    }
+
+    const sourceRows = Array.from(sourceTotals.values()).sort(
+      (a, b) => b.errors - a.errors || a.source.localeCompare(b.source),
+    )
+    return {
+      totalRequests,
+      totalErrors,
+      totalFatal,
+      resultCodeRows: sortCountRows(resultCodeCounts),
+      resultCategoryRows: sortCountRows(resultCategoryCounts),
+      sourceRows,
+    }
+  }, [availableSources, metrics, selectedSources, statsScope])
+
+  const tracebackRows = useMemo<TracebackRow[]>(() => {
+    if (!metrics) {
+      return []
+    }
+
+    const rows: TracebackRow[] = []
+
+    for (const metric of metrics.metrics) {
+      if (!metric.events) {
+        continue
+      }
+
+      for (const event of metric.events) {
+        if (!event.data || typeof event.data !== 'object') {
+          continue
+        }
+
+        const data = event.data as Record<string, unknown>
+        const category = normalizedString(data.result_category) ?? 'unknown'
+        const errorMessage = normalizedString(data.error_message)
+        const traceback = readErrorTraceback(data)
+        const status = typeof data.status === 'boolean' ? data.status : null
+        const isErrorEvent =
+          status === false || category !== 'ok' || traceback !== null || errorMessage !== null
+
+        if (!isErrorEvent) {
+          continue
+        }
+
+        const detail = traceback ?? errorMessage
+        if (detail === null) {
+          continue
+        }
+
+        const source = normalizedString(data.source) ?? 'unknown'
+        const stage = normalizedString(data.stage) ?? 'unknown'
+        const errorType = normalizedString(data.error_type)
+        const timestampMs = parseStreamEventTimestampMs(event.event_id)
+
+        rows.push({
+          key: `${metric.metric_id}:${event.event_id}`,
+          metricId: normalizedString(data.name) ?? metric.metric_id,
+          source,
+          stage,
+          category,
+          errorType,
+          errorMessage,
+          traceback: detail,
+          eventId: event.event_id,
+          timestampMs,
+        })
+      }
+    }
+
+    return rows.sort((a, b) => {
+      if (a.timestampMs !== null && b.timestampMs !== null) {
+        return b.timestampMs - a.timestampMs
+      }
+      if (a.timestampMs !== null) {
+        return -1
+      }
+      if (b.timestampMs !== null) {
+        return 1
+      }
+      return b.eventId.localeCompare(a.eventId)
+    })
+  }, [metrics])
+
+  const tracebackCategories = useMemo(() => {
+    const values = new Set<string>()
+    for (const row of tracebackRows) {
+      values.add(row.category)
+    }
+    return Array.from(values).sort((a, b) => a.localeCompare(b))
+  }, [tracebackRows])
+
+  const filteredTracebackRows = useMemo(() => {
+    if (selectedTracebackCategory === 'all') {
+      return tracebackRows
+    }
+    return tracebackRows.filter((row) => row.category === selectedTracebackCategory)
+  }, [selectedTracebackCategory, tracebackRows])
+
+  const selectedSourcesSummary = useMemo(() => {
+    if (availableSources.length === 0) {
+      return 'All sources'
+    }
+    if (selectedSources.length === availableSources.length) {
+      return 'All sources'
+    }
+    if (selectedSources.length === 1) {
+      return selectedSources[0]
+    }
+    return `${selectedSources.length} selected`
+  }, [availableSources, selectedSources])
+
+  const selectedErrorsCategoryLabel =
+    selectedTracebackCategory === 'all' ? 'All categories' : selectedTracebackCategory
+
+  useEffect(() => {
+    const currentStatus = statusLabel(ready?.state)
+    document.title = `Vikhry - ${currentStatus}`
+  }, [ready?.state])
+
   const workerRows = useMemo(() => {
     if (!workers) {
       return []
@@ -641,32 +937,20 @@ export function LoadTestingScreen() {
 
     return workers.workers.map((worker) => {
       const badge = workerBadge(worker)
-      const processRamBytes =
-        typeof worker.process_ram_bytes === 'number' && Number.isFinite(worker.process_ram_bytes)
-          ? worker.process_ram_bytes
-          : typeof worker.rss_bytes === 'number' && Number.isFinite(worker.rss_bytes)
-            ? worker.rss_bytes
-            : null
-      const totalRamBytes =
-        typeof worker.total_ram_bytes === 'number' && Number.isFinite(worker.total_ram_bytes)
-          ? worker.total_ram_bytes
-          : null
+      const activeUsers = resolveWorkerActiveUsersCount(worker)
+      const totalAssignedUsers = Math.max(0, Math.floor(worker.users_count))
+      const usersSummary = `${numberFormatter.format(activeUsers)}/${numberFormatter.format(totalAssignedUsers)}`
+      const processRamBytes = worker.process_ram_bytes
+      const totalRamBytes = worker.total_ram_bytes
       const ramUsage = formatRamUsage(processRamBytes, totalRamBytes)
 
-      const rawCpu = worker.cpu_percent ?? worker.cpu_load ?? null
+      const rawCpu = worker.cpu_percent
       const cpuLoad =
         typeof rawCpu === 'number' && Number.isFinite(rawCpu)
           ? clampPercent(rawCpu)
           : null
 
       const rawMemory = (() => {
-        if (typeof worker.memory_percent === 'number' && Number.isFinite(worker.memory_percent)) {
-          return worker.memory_percent
-        }
-        if (typeof worker.ram_load === 'number' && Number.isFinite(worker.ram_load)) {
-          return worker.ram_load
-        }
-
         if (processRamBytes === null || totalRamBytes === null || totalRamBytes <= 0) {
           return null
         }
@@ -680,6 +964,7 @@ export function LoadTestingScreen() {
       return {
         worker,
         badge,
+        usersSummary,
         cpuLoad,
         ramLoad,
         ramUsage,
@@ -788,10 +1073,6 @@ export function LoadTestingScreen() {
     }
     return resources.resources.map((resource) => resource.resource_name).join(', ')
   }, [resources])
-
-  const refreshData = useCallback(async () => {
-    await refresh()
-  }, [refresh])
 
   const openChangeUsersModal = useCallback(() => {
     setChangeUsersInput(String(totalUsers))
@@ -934,6 +1215,45 @@ export function LoadTestingScreen() {
     })
   }, [])
 
+  const toggleColumnsMenu = useCallback(() => {
+    setColumnsOpen((current) => !current)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+  }, [])
+
+  const toggleSourceFilter = useCallback((source: string) => {
+    setSelectedSources((current) => {
+      if (current.includes(source)) {
+        if (current.length <= 1) {
+          return current
+        }
+        return current.filter((value) => value !== source)
+      }
+      return [...current, source].sort((a, b) => a.localeCompare(b))
+    })
+  }, [])
+
+  const selectAllSources = useCallback(() => {
+    setSelectedSources(availableSources)
+  }, [availableSources])
+
+  const toggleSourcesMenu = useCallback(() => {
+    setSourcesOpen((current) => !current)
+    setColumnsOpen(false)
+    setErrorsCategoryOpen(false)
+  }, [])
+
+  const toggleErrorsCategoryMenu = useCallback(() => {
+    setErrorsCategoryOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+  }, [])
+
+  const selectErrorsCategory = useCallback((value: string) => {
+    setSelectedTracebackCategory(value)
+    setErrorsCategoryOpen(false)
+  }, [])
+
   const toggleRpsMetric = useCallback((metricId: string) => {
     setRpsSelectionTouched(true)
     setSelectedRpsMetrics((current) => {
@@ -971,13 +1291,43 @@ export function LoadTestingScreen() {
   }, [])
 
   useEffect(() => {
-    if (!columnsOpen) {
+    if (availableSources.length === 0) {
+      setSelectedSources([])
+      return
+    }
+    setSelectedSources((current) => {
+      const filtered = current.filter((source) => availableSources.includes(source))
+      if (filtered.length > 0) {
+        return filtered
+      }
+      return availableSources
+    })
+  }, [availableSources])
+
+  useEffect(() => {
+    if (selectedTracebackCategory === 'all') {
+      return
+    }
+    if (!tracebackCategories.includes(selectedTracebackCategory)) {
+      setSelectedTracebackCategory('all')
+    }
+  }, [selectedTracebackCategory, tracebackCategories])
+
+  useEffect(() => {
+    if (!columnsOpen && !sourcesOpen && !errorsCategoryOpen) {
       return
     }
 
     const onPointerDown = (event: PointerEvent) => {
-      if (!columnsContainerRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node
+      if (columnsOpen && !columnsContainerRef.current?.contains(target)) {
         setColumnsOpen(false)
+      }
+      if (sourcesOpen && !sourcesContainerRef.current?.contains(target)) {
+        setSourcesOpen(false)
+      }
+      if (errorsCategoryOpen && !errorsCategoryContainerRef.current?.contains(target)) {
+        setErrorsCategoryOpen(false)
       }
     }
 
@@ -985,7 +1335,7 @@ export function LoadTestingScreen() {
     return () => {
       window.removeEventListener('pointerdown', onPointerDown)
     }
-  }, [columnsOpen])
+  }, [columnsOpen, errorsCategoryOpen, sourcesOpen])
 
   useEffect(() => {
     if (!error) {
@@ -1066,20 +1416,23 @@ export function LoadTestingScreen() {
           return
         }
         setScenarioSpec(spec)
-        setInitParamValues(() => {
-          const initial: Record<string, string> = {}
+        setInitParamValues((current) => {
+          const merged = { ...current }
           for (const param of spec.params) {
+            if (Object.prototype.hasOwnProperty.call(current, param.name)) {
+              continue
+            }
             if (param.default === null || param.default === undefined) {
-              initial[param.name] = ''
+              merged[param.name] = ''
               continue
             }
             if (typeof param.default === 'string') {
-              initial[param.name] = param.default
+              merged[param.name] = param.default
               continue
             }
-            initial[param.name] = JSON.stringify(param.default)
+            merged[param.name] = JSON.stringify(param.default)
           }
-          return initial
+          return merged
         })
       } catch (loadError) {
         if (cancelled) {
@@ -1110,19 +1463,22 @@ export function LoadTestingScreen() {
         </div>
 
         <div className="topbar__status-group">
-          <div className={`pill pill--state ${statusToneClass(ready?.state)}`}>
+          <div
+            className={`pill pill--state has-tooltip ${statusToneClass(ready?.state)}`}
+            data-tooltip={`Status: ${statusLabel(ready?.state)}`}
+          >
             <Play size={10} fill="currentColor" />
             <span>{statusLabel(ready?.state)}</span>
           </div>
-          <div className="pill">
+          <div className="pill has-tooltip" data-tooltip="Active users on alive workers">
             <Users size={12} />
             <span>{numberFormatter.format(totalUsers)}</span>
           </div>
-          <div className="pill">
+          <div className="pill has-tooltip" data-tooltip="Alive workers">
             <Gauge size={12} />
             <span>{numberFormatter.format(ready?.alive_workers ?? 0)}</span>
           </div>
-          <div className="pill">
+          <div className="pill has-tooltip" data-tooltip="Current total RPS">
             <Activity size={12} />
             <span>{compactNumberFormatter.format(totalRps)} RPS</span>
           </div>
@@ -1130,24 +1486,45 @@ export function LoadTestingScreen() {
 
         <div className="topbar__actions">
           {canStart ? (
-            <button className="btn btn--primary" type="button" onClick={() => setStartModalOpen(true)}>
+            <button
+              className="btn btn--primary has-tooltip"
+              type="button"
+              onClick={() => setStartModalOpen(true)}
+              data-tooltip="Start test run"
+            >
               <Play size={12} />
               <span>Start</span>
             </button>
           ) : null}
           {canStop ? (
-            <button className="btn btn--primary" disabled={stopping} onClick={() => void onStop()} type="button">
+            <button
+              className="btn btn--primary has-tooltip"
+              disabled={stopping}
+              onClick={() => void onStop()}
+              type="button"
+              data-tooltip={stopping ? 'Stopping test run...' : 'Stop test run'}
+            >
               <Square size={12} />
               <span>{stopping ? 'Stopping...' : 'Stop'}</span>
             </button>
           ) : null}
           {canChangeUsers ? (
-            <button className="btn" type="button" onClick={openChangeUsersModal}>
+            <button
+              className="btn has-tooltip"
+              type="button"
+              onClick={openChangeUsersModal}
+              data-tooltip="Change target users"
+            >
               <Users size={12} />
               <span>Change users</span>
             </button>
           ) : null}
-          <button className="btn" type="button" onClick={() => openResourceModal()}>
+          <button
+            className="btn has-tooltip"
+            type="button"
+            onClick={() => openResourceModal()}
+            data-tooltip="Create resources"
+          >
             <Layers size={12} />
             <span>Create resources</span>
           </button>
@@ -1175,33 +1552,35 @@ export function LoadTestingScreen() {
               <div className="statistics-controls">
                 <div className="stats-scope-toggle" role="group" aria-label="Statistics scope">
                   <button
-                    className={
-                      statsScope === 'window'
-                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active'
-                        : 'stats-scope-toggle__btn'
-                    }
                     type="button"
                     onClick={() => setStatsScope('window')}
                     aria-pressed={statsScope === 'window'}
+                    data-tooltip="Show metrics for rolling time window"
+                    className={
+                      statsScope === 'window'
+                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active has-tooltip'
+                        : 'stats-scope-toggle__btn has-tooltip'
+                    }
                   >
                     Window
                   </button>
                   <button
-                    className={
-                      statsScope === 'total'
-                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active'
-                        : 'stats-scope-toggle__btn'
-                    }
                     type="button"
                     onClick={() => setStatsScope('total')}
                     aria-pressed={statsScope === 'total'}
+                    data-tooltip="Show cumulative metrics for whole test run"
+                    className={
+                      statsScope === 'total'
+                        ? 'stats-scope-toggle__btn stats-scope-toggle__btn--active has-tooltip'
+                        : 'stats-scope-toggle__btn has-tooltip'
+                    }
                   >
                     Whole test
                   </button>
                 </div>
 
                 <div className="columns-control" ref={columnsContainerRef}>
-                  <button className="btn" type="button" onClick={() => setColumnsOpen((current) => !current)}>
+                  <button className="btn" type="button" onClick={toggleColumnsMenu}>
                     <Columns3 size={12} />
                     <span>Columns</span>
                     <ChevronDown size={12} />
@@ -1239,7 +1618,9 @@ export function LoadTestingScreen() {
                 <tbody>
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={visibleColumns.length}>No metrics received from /metrics yet.</td>
+                      <td className="table-empty" colSpan={visibleColumns.length}>
+                        No data
+                      </td>
                     </tr>
                   ) : (
                     rows.map((row) => (
@@ -1267,6 +1648,225 @@ export function LoadTestingScreen() {
                 </tbody>
               </table>
             </section>
+
+            <section className="error-breakdown">
+              <div className="error-breakdown__header">
+                <h2>Error Breakdown</h2>
+                <div className="columns-control" ref={sourcesContainerRef}>
+                  <button className="btn" type="button" onClick={toggleSourcesMenu}>
+                    <span>{selectedSourcesSummary}</span>
+                    <ChevronDown size={12} />
+                  </button>
+                  {sourcesOpen ? (
+                    <div className="columns-menu">
+                      <button
+                        type="button"
+                        className="columns-menu__action"
+                        onClick={selectAllSources}
+                        disabled={
+                          availableSources.length === 0 ||
+                          selectedSources.length === availableSources.length
+                        }
+                      >
+                        All sources
+                      </button>
+                      {availableSources.map((source) => (
+                        <label key={source} className="columns-menu__item">
+                          <input
+                            type="checkbox"
+                            checked={selectedSources.includes(source)}
+                            onChange={() => toggleSourceFilter(source)}
+                          />
+                          <span>{source}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="error-summary-grid">
+                <article className="error-summary-card">
+                  <p className="error-summary-card__label">Requests</p>
+                  <p className="error-summary-card__value">
+                    {numberFormatter.format(errorBreakdown.totalRequests)}
+                  </p>
+                </article>
+                <article className="error-summary-card">
+                  <p className="error-summary-card__label">Errors</p>
+                  <p className="error-summary-card__value">
+                    {numberFormatter.format(errorBreakdown.totalErrors)}
+                  </p>
+                </article>
+                <article
+                  className={
+                    errorBreakdown.totalFatal > 0
+                      ? 'error-summary-card error-summary-card--fatal'
+                      : 'error-summary-card'
+                  }
+                >
+                  <p className="error-summary-card__label">Fatal</p>
+                  <p className="error-summary-card__value">
+                    {numberFormatter.format(errorBreakdown.totalFatal)}
+                  </p>
+                </article>
+                <article className="error-summary-card">
+                  <p className="error-summary-card__label">Failure Rate</p>
+                  <p className="error-summary-card__value">
+                    {errorBreakdown.totalRequests > 0
+                      ? `${((errorBreakdown.totalErrors / errorBreakdown.totalRequests) * 100).toFixed(2)}%`
+                      : '0.00%'}
+                  </p>
+                </article>
+              </div>
+
+              <div className="error-breakdown-grid">
+                <article className="error-panel">
+                  <header className="error-panel__header">
+                    <h3>Top Result Codes</h3>
+                  </header>
+                  {errorBreakdown.resultCodeRows.length === 0 ? (
+                    <p className="error-panel__empty">No result codes in selected scope.</p>
+                  ) : (
+                    <ul className="error-list">
+                      {errorBreakdown.resultCodeRows.slice(0, 10).map((row) => (
+                        <li key={row.label} className="error-list__row">
+                          <span className="error-list__label">{row.label}</span>
+                          <span className="error-list__value">{numberFormatter.format(row.count)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </article>
+
+                <article className="error-panel">
+                  <header className="error-panel__header">
+                    <h3>Result Categories</h3>
+                  </header>
+                  {errorBreakdown.resultCategoryRows.length === 0 ? (
+                    <p className="error-panel__empty">No categories in selected scope.</p>
+                  ) : (
+                    <ul className="error-list">
+                      {errorBreakdown.resultCategoryRows.slice(0, 10).map((row) => (
+                        <li key={row.label} className="error-list__row">
+                          <span className="error-list__label">{row.label}</span>
+                          <span className="error-list__value">{numberFormatter.format(row.count)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </article>
+
+                <article className="error-panel">
+                  <header className="error-panel__header">
+                    <h3>By Source</h3>
+                  </header>
+                  {errorBreakdown.sourceRows.length === 0 ? (
+                    <p className="error-panel__empty">No source data in selected scope.</p>
+                  ) : (
+                    <ul className="error-list">
+                      {errorBreakdown.sourceRows.map((row) => (
+                        <li key={row.source} className="error-list__row error-list__row--source">
+                          <span className="error-list__label">{row.source}</span>
+                          <span className="error-list__meta">
+                            {numberFormatter.format(row.errors)} err / {numberFormatter.format(row.requests)} req
+                          </span>
+                          <span className="error-list__value">{numberFormatter.format(row.fatal)} fatal</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </article>
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {activeTab === 'errors' ? (
+          <>
+            <section className="section-header">
+              <h1>Errors</h1>
+              <div className="columns-control errors-controls" ref={errorsCategoryContainerRef}>
+                <button className="btn" type="button" onClick={toggleErrorsCategoryMenu}>
+                  <span>{selectedErrorsCategoryLabel}</span>
+                  <ChevronDown size={12} />
+                </button>
+                {errorsCategoryOpen ? (
+                  <div className="columns-menu">
+                    <button
+                      type="button"
+                      className={
+                        selectedTracebackCategory === 'all'
+                          ? 'columns-menu__option columns-menu__option--active'
+                          : 'columns-menu__option'
+                      }
+                      onClick={() => selectErrorsCategory('all')}
+                    >
+                      All categories
+                    </button>
+                    {tracebackCategories.map((category) => (
+                      <button
+                        key={category}
+                        type="button"
+                        className={
+                          selectedTracebackCategory === category
+                            ? 'columns-menu__option columns-menu__option--active'
+                            : 'columns-menu__option'
+                        }
+                        onClick={() => selectErrorsCategory(category)}
+                      >
+                        {category}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="table-card errors-table-card">
+              <table className="errors-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Category</th>
+                    <th>Source</th>
+                    <th>Metric</th>
+                    <th>Traceback</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTracebackRows.length === 0 ? (
+                    <tr>
+                      <td className="table-empty" colSpan={5}>
+                        No data
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredTracebackRows.map((row) => (
+                      <tr key={row.key}>
+                        <td>{formatEventTimestamp(row.timestampMs)}</td>
+                        <td>{row.category}</td>
+                        <td>{row.source}</td>
+                        <td>
+                          <div className="errors-metric-cell">
+                            <span className="errors-metric-cell__name">{row.metricId}</span>
+                            <span className="errors-metric-cell__meta">{row.stage}</span>
+                          </div>
+                        </td>
+                        <td className="errors-traceback-cell">
+                          {row.errorType || row.errorMessage ? (
+                            <p className="errors-traceback-meta">
+                              {[row.errorType, row.errorMessage].filter(Boolean).join(': ')}
+                            </p>
+                          ) : null}
+                          <pre className="errors-traceback-content">{row.traceback}</pre>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </section>
           </>
         ) : null}
 
@@ -1274,13 +1874,9 @@ export function LoadTestingScreen() {
           <>
             <section className="section-header">
               <h1>Resources</h1>
-              <button className="btn" type="button" onClick={() => void refreshData()} disabled={refreshing}>
-                <RefreshCcw size={12} className={refreshing ? 'spin' : undefined} />
-                <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
-              </button>
             </section>
 
-            <section className="table-card resources-table">
+            <section className="table-card">
               <table>
                 <thead>
                   <tr>
@@ -1292,7 +1888,9 @@ export function LoadTestingScreen() {
                 <tbody>
                   {!resources || resources.resources.length === 0 ? (
                     <tr>
-                      <td colSpan={3}>No resources in orchestrator state (/resources).</td>
+                      <td className="table-empty" colSpan={3}>
+                        No data
+                      </td>
                     </tr>
                   ) : (
                     resources.resources.map((resource) => (
@@ -1321,19 +1919,16 @@ export function LoadTestingScreen() {
           <>
             <section className="section-header">
               <h1>Active Workers</h1>
-              <button className="btn" type="button" onClick={() => void refreshData()} disabled={refreshing}>
-                <RefreshCcw size={12} className={refreshing ? 'spin' : undefined} />
-                <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
-              </button>
             </section>
 
-            <section className="table-card workers-table">
+            <section className="table-card">
               <table>
                 <thead>
                   <tr>
                     <th>Worker ID</th>
                     <th>Healthcheck</th>
                     <th>Last Seen</th>
+                    <th>Users</th>
                     <th>CPU Load</th>
                     <th>RAM Load</th>
                   </tr>
@@ -1341,10 +1936,12 @@ export function LoadTestingScreen() {
                 <tbody>
                   {workerRows.length === 0 ? (
                     <tr>
-                      <td colSpan={5}>No workers in orchestrator state (/workers).</td>
+                      <td className="table-empty" colSpan={6}>
+                        No data
+                      </td>
                     </tr>
                   ) : (
-                    workerRows.map(({ worker, badge, cpuLoad, ramLoad, ramUsage }) => (
+                    workerRows.map(({ worker, badge, usersSummary, cpuLoad, ramLoad, ramUsage }) => (
                       <tr key={worker.worker_id}>
                         <td>{worker.worker_id}</td>
                         <td>
@@ -1362,6 +1959,7 @@ export function LoadTestingScreen() {
                             {formatLastSeen(worker.heartbeat_age_s)}
                           </span>
                         </td>
+                        <td>{usersSummary}</td>
                         <td>
                           {cpuLoad === null ? (
                             <span className="load-unavailable">—</span>
@@ -1405,10 +2003,6 @@ export function LoadTestingScreen() {
           <>
             <section className="section-header">
               <h1>Test Charts</h1>
-              <button className="btn" type="button" onClick={() => void refreshData()} disabled={refreshing}>
-                <RefreshCcw size={12} className={refreshing ? 'spin' : undefined} />
-                <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
-              </button>
             </section>
 
             <section className="chart-grid">

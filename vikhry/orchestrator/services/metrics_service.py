@@ -5,6 +5,7 @@ import logging
 import math
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -19,9 +20,12 @@ class _MetricBucket:
     second: int
     requests: int = 0
     errors: int = 0
+    fatal_count: int = 0
     latency_sum_ms: float = 0.0
     latency_samples: int = 0
     latencies_ms: list[float] = field(default_factory=list)
+    result_code_counts: dict[str, int] = field(default_factory=dict)
+    result_category_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -31,9 +35,12 @@ class _MetricState:
     recent_events: deque[dict[str, Any]] = field(default_factory=deque)
     total_requests: int = 0
     total_errors: int = 0
+    total_fatal_count: int = 0
     total_latency_sum_ms: float = 0.0
     total_latency_samples: int = 0
     total_latencies_ms: list[float] = field(default_factory=list)
+    total_result_code_counts: dict[str, int] = field(default_factory=dict)
+    total_result_category_counts: dict[str, int] = field(default_factory=dict)
 
 
 class MetricsService:
@@ -46,6 +53,7 @@ class MetricsService:
         max_events_per_metric_per_poll: int = 300,
         max_recent_events_per_metric: int = 1000,
         max_subscriber_queue: int = 64,
+        max_result_codes: int = 10,
     ) -> None:
         self._state_repo = state_repo
         self._poll_interval_s = poll_interval_s
@@ -53,6 +61,7 @@ class MetricsService:
         self._max_events_per_metric_per_poll = max(1, max_events_per_metric_per_poll)
         self._max_recent_events_per_metric = max(1, max_recent_events_per_metric)
         self._max_subscriber_queue = max(1, max_subscriber_queue)
+        self._max_result_codes = max(1, max_result_codes)
 
         self._metrics: dict[str, _MetricState] = {}
         self._subscribers: dict[str, asyncio.Queue[dict[str, object]]] = {}
@@ -219,6 +228,20 @@ class MetricsService:
             bucket.errors += 1
             state.total_errors += 1
 
+        result_code = _extract_result_code(data)
+        if result_code is not None:
+            _increment_counter(bucket.result_code_counts, result_code)
+            _increment_counter(state.total_result_code_counts, result_code)
+
+        result_category = _extract_result_category(data)
+        if result_category is not None:
+            _increment_counter(bucket.result_category_counts, result_category)
+            _increment_counter(state.total_result_category_counts, result_category)
+
+        if _is_fatal_event(data):
+            bucket.fatal_count += 1
+            state.total_fatal_count += 1
+
         latency_ms = _extract_latency_ms(data)
         if latency_ms is not None:
             bucket.latency_sum_ms += latency_ms
@@ -253,6 +276,15 @@ class MetricsService:
         latencies_ms = sorted(
             latency for bucket in state.buckets for latency in bucket.latencies_ms
         )
+        fatal_count = sum(bucket.fatal_count for bucket in state.buckets)
+        result_code_counts = _merge_counts(bucket.result_code_counts for bucket in state.buckets)
+        result_category_counts = _merge_counts(
+            bucket.result_category_counts for bucket in state.buckets
+        )
+        limited_result_codes = _limit_counts(
+            result_code_counts,
+            top_k=self._max_result_codes,
+        )
 
         return {
             "window_s": self._window_s,
@@ -266,11 +298,19 @@ class MetricsService:
             "latency_median_ms": _sorted_median(latencies_ms),
             "latency_p95_ms": _sorted_percentile_nearest_rank(latencies_ms, percentile=95),
             "latency_p99_ms": _sorted_percentile_nearest_rank(latencies_ms, percentile=99),
+            "result_code_counts": limited_result_codes,
+            "result_category_counts": _sort_counts(result_category_counts),
+            "fatal_count": fatal_count,
+            "top_result_codes": _to_top_result_codes(limited_result_codes),
         }
 
     def _aggregate_total(self, state: _MetricState, now_ms: int) -> dict[str, object]:
         elapsed_s = _elapsed_total_window_s(now_ms=now_ms, started_at_ms=self._run_started_at_ms)
         total_latencies_ms = sorted(state.total_latencies_ms)
+        limited_result_codes = _limit_counts(
+            state.total_result_code_counts,
+            top_k=self._max_result_codes,
+        )
 
         return {
             "window_s": elapsed_s,
@@ -286,6 +326,10 @@ class MetricsService:
             "latency_median_ms": _sorted_median(total_latencies_ms),
             "latency_p95_ms": _sorted_percentile_nearest_rank(total_latencies_ms, percentile=95),
             "latency_p99_ms": _sorted_percentile_nearest_rank(total_latencies_ms, percentile=99),
+            "result_code_counts": limited_result_codes,
+            "result_category_counts": _sort_counts(state.total_result_category_counts),
+            "fatal_count": state.total_fatal_count,
+            "top_result_codes": _to_top_result_codes(limited_result_codes),
         }
 
     def _build_snapshot_locked(
@@ -357,6 +401,10 @@ class MetricsService:
             "latency_median_ms": None,
             "latency_p95_ms": None,
             "latency_p99_ms": None,
+            "result_code_counts": {},
+            "result_category_counts": {},
+            "fatal_count": 0,
+            "top_result_codes": [],
         }
 
     def _fanout_locked(self, payload: dict[str, object]) -> None:
@@ -432,10 +480,27 @@ def _sorted_percentile_nearest_rank(
 
 
 def _extract_latency_ms(payload: dict[str, Any]) -> float | None:
-    for key in ("time", "latency_ms", "duration_ms", "latency", "duration"):
-        parsed = _to_float(payload.get(key))
-        if parsed is not None and parsed >= 0:
-            return parsed
+    parsed = _to_float(payload.get("time"))
+    if parsed is not None and parsed >= 0:
+        return parsed
+    return None
+
+
+def _extract_result_code(payload: dict[str, Any]) -> str | None:
+    value = payload.get("result_code")
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_result_category(payload: dict[str, Any]) -> str | None:
+    value = payload.get("result_category")
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
     return None
 
 
@@ -443,35 +508,51 @@ def _is_error_event(payload: dict[str, Any]) -> bool:
     status = payload.get("status")
     if isinstance(status, bool):
         return not status
-    if isinstance(status, str):
-        normalized = status.strip().lower()
-        if normalized in {"ok", "success", "true", "1"}:
-            return False
-        if normalized in {"error", "failed", "false", "0"}:
-            return True
-
-    status_code = _to_int(payload.get("status_code"))
-    if status_code is not None:
-        return status_code >= 400
-
-    error = payload.get("error")
-    if isinstance(error, bool):
-        return error
-    if isinstance(error, (int, float)):
-        return bool(error)
-    if isinstance(error, str):
-        return error.lower() not in {"", "0", "false", "none", "null"}
-
-    for key in ("ok", "success"):
-        value = payload.get(key)
-        if isinstance(value, bool):
-            return not value
-        if isinstance(value, (int, float)):
-            return value == 0
-        if isinstance(value, str):
-            return value.lower() in {"0", "false", "no"}
-
     return False
+
+
+def _is_fatal_event(payload: dict[str, Any]) -> bool:
+    fatal = payload.get("fatal")
+    if isinstance(fatal, bool):
+        return fatal
+    return False
+
+
+def _increment_counter(target: dict[str, int], key: str) -> None:
+    target[key] = target.get(key, 0) + 1
+
+
+def _merge_counts(items: Iterable[dict[str, int]]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for entry in items:
+        for key, value in entry.items():
+            merged[key] = merged.get(key, 0) + int(value)
+    return merged
+
+
+def _sort_counts(counts: dict[str, int]) -> dict[str, int]:
+    sorted_items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {key: value for key, value in sorted_items}
+
+
+def _limit_counts(counts: dict[str, int], *, top_k: int) -> dict[str, int]:
+    if len(counts) <= top_k:
+        return _sort_counts(counts)
+
+    sorted_items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    top_items = sorted_items[:top_k]
+    other_count = sum(value for _, value in sorted_items[top_k:])
+    limited = {key: value for key, value in top_items}
+    if other_count > 0:
+        limited["OTHER"] = other_count
+    return limited
+
+
+def _to_top_result_codes(result_code_counts: dict[str, int]) -> list[dict[str, object]]:
+    return [
+        {"result_code": result_code, "count": count}
+        for result_code, count in result_code_counts.items()
+    ]
 
 
 def _to_int(value: object) -> int | None:

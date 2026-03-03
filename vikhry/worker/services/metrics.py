@@ -20,8 +20,7 @@ class WorkerMetricsPublisher:
     ) -> None:
         self._state_repo = state_repo
         self._worker_id = worker_id
-        normalized_fallback = (metric_id or "").strip()
-        self._fallback_metric_id = normalized_fallback or f"worker:{worker_id}"
+        _ = metric_id
 
     def bind_user(self, user_id: str) -> MetricEmitter:
         async def _emit(metric: dict[str, Any]) -> None:
@@ -52,4 +51,4 @@ class WorkerMetricsPublisher:
             normalized_name = raw_name.strip()
             if normalized_name:
                 return normalized_name
-        return self._fallback_metric_id
+        raise ValueError("metric payload must contain non-empty `name`")

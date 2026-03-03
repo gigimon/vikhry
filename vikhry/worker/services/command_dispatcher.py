@@ -149,6 +149,7 @@ class WorkerCommandDispatcher:
         if command.epoch > state.current_epoch:
             await self._stop_all_user_tasks()
             state.assigned_users.clear()
+            await self._state_repo.clear_worker_active_users(self._worker_id)
             state.current_epoch = command.epoch
 
         state.init_params = dict(payload.init_params)
@@ -175,6 +176,7 @@ class WorkerCommandDispatcher:
         state.phase = WorkerPhase.STOPPING
         await self._stop_all_user_tasks()
         state.assigned_users.clear()
+        await self._state_repo.clear_worker_active_users(self._worker_id)
         state.init_params.clear()
         state.phase = WorkerPhase.IDLE
         logger.info("accepted stop_test (worker_id=%s, epoch=%s)", self._worker_id, state.current_epoch)
@@ -227,6 +229,7 @@ class WorkerCommandDispatcher:
         payload = command.require_payload(RemoveUserPayload)
         user_id = str(payload.user_id)
         state.assigned_users.discard(user_id)
+        await self._state_repo.remove_worker_active_user(self._worker_id, user_id)
         user_task = state.user_tasks.pop(user_id, None)
         if user_task is not None:
             user_task.cancel()

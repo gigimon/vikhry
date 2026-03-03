@@ -51,6 +51,10 @@ class TestStateRepository:
         return f"worker:{worker_id}:users"
 
     @staticmethod
+    def worker_active_users_key(worker_id: str) -> str:
+        return f"worker:{worker_id}:active_users"
+
+    @staticmethod
     def worker_command_channel(worker_id: str) -> str:
         return f"worker:{worker_id}:commands"
 
@@ -113,6 +117,7 @@ class TestStateRepository:
         pipeline.srem("workers", worker_id)
         pipeline.delete(self.worker_status_key(worker_id))
         pipeline.delete(self.worker_users_key(worker_id))
+        pipeline.delete(self.worker_active_users_key(worker_id))
         await pipeline.execute()
 
     async def list_workers(self) -> list[str]:
@@ -143,6 +148,9 @@ class TestStateRepository:
     async def list_worker_users(self, worker_id: str) -> list[str]:
         users = await self._redis.smembers(self.worker_users_key(worker_id))
         return sorted(str(user_id) for user_id in users)
+
+    async def count_worker_active_users(self, worker_id: str) -> int:
+        return int(await self._redis.scard(self.worker_active_users_key(worker_id)))
 
     async def add_user_assignment(self, assignment: UserAssignment) -> None:
         user_id = str(assignment.user_id)
@@ -188,6 +196,7 @@ class TestStateRepository:
             pipeline.delete(self.user_key(user_id))
         for worker_id in workers:
             pipeline.delete(self.worker_users_key(worker_id))
+            pipeline.delete(self.worker_active_users_key(worker_id))
         await pipeline.execute()
 
     async def set_user_status(

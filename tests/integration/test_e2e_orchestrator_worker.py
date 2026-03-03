@@ -179,6 +179,10 @@ async def test_e2e_orchestrator_worker_cli_redis_visibility_spec(
             timeout_s=5.0,
         )
         assert await redis_client.scard(f"worker:{worker_id}:users") == 3
+        await _wait_until(
+            lambda: _redis_scard_equals(redis_client, f"worker:{worker_id}:active_users", 3),
+            timeout_s=5.0,
+        )
         for user_id in ("1", "2", "3"):
             raw_user = await redis_client.hgetall(f"user:{user_id}")
             assert raw_user.get("worker_id") == worker_id
@@ -199,6 +203,10 @@ async def test_e2e_orchestrator_worker_cli_redis_visibility_spec(
             timeout_s=5.0,
         )
         assert await redis_client.scard(f"worker:{worker_id}:users") == 5
+        await _wait_until(
+            lambda: _redis_scard_equals(redis_client, f"worker:{worker_id}:active_users", 5),
+            timeout_s=5.0,
+        )
 
         _run_cli(
             "test",
@@ -215,6 +223,10 @@ async def test_e2e_orchestrator_worker_cli_redis_visibility_spec(
             timeout_s=5.0,
         )
         assert await redis_client.scard(f"worker:{worker_id}:users") == 2
+        await _wait_until(
+            lambda: _redis_scard_equals(redis_client, f"worker:{worker_id}:active_users", 2),
+            timeout_s=5.0,
+        )
 
         _run_cli(
             "test",
@@ -233,6 +245,7 @@ async def test_e2e_orchestrator_worker_cli_redis_visibility_spec(
             timeout_s=5.0,
         )
         assert await redis_client.exists(f"worker:{worker_id}:users") == 0
+        assert await redis_client.exists(f"worker:{worker_id}:active_users") == 0
     finally:
         if worker_started:
             subprocess.run(

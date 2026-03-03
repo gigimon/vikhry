@@ -53,8 +53,15 @@ export async function fetchWorkers(): Promise<WorkersResponse> {
   return requestJson<WorkersResponse>('/workers')
 }
 
-export async function fetchMetrics(): Promise<MetricsResponse> {
-  return requestJson<MetricsResponse>('/metrics?count=1&include_events=true')
+export async function fetchMetrics(options?: {
+  count?: number
+  includeEvents?: boolean
+}): Promise<MetricsResponse> {
+  const count = options?.count ?? 1
+  const includeEvents = options?.includeEvents ?? true
+  return requestJson<MetricsResponse>(
+    `/metrics?count=${count}&include_events=${includeEvents ? 'true' : 'false'}`,
+  )
 }
 
 export async function fetchResources(): Promise<ResourcesResponse> {

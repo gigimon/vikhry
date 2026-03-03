@@ -219,9 +219,10 @@ async def _build_workers_response(
             "workers": [],
         }
 
-    statuses, worker_users = await asyncio.gather(
+    statuses, worker_users, active_users_counts = await asyncio.gather(
         asyncio.gather(*(state_repo.get_worker_status(worker_id) for worker_id in worker_ids)),
         asyncio.gather(*(state_repo.list_worker_users(worker_id) for worker_id in worker_ids)),
+        asyncio.gather(*(state_repo.count_worker_active_users(worker_id) for worker_id in worker_ids)),
     )
     return {
         "generated_at": now_ts,
@@ -231,9 +232,12 @@ async def _build_workers_response(
                 worker_id=worker_id,
                 status=status,
                 users_count=len(users),
+                active_users_count=active_users_count,
                 now_ts=now_ts,
             )
-            for worker_id, status, users in zip(worker_ids, statuses, worker_users, strict=True)
+            for worker_id, status, users, active_users_count in zip(
+                worker_ids, statuses, worker_users, active_users_counts, strict=True
+            )
         ],
     }
 
@@ -243,6 +247,7 @@ def _worker_payload(
     worker_id: str,
     status: WorkerStatus | None,
     users_count: int,
+    active_users_count: int,
     now_ts: int,
 ) -> dict[str, object]:
     status_value: str | None = None
@@ -264,6 +269,7 @@ def _worker_payload(
         "last_heartbeat": last_heartbeat,
         "heartbeat_age_s": heartbeat_age_s,
         "users_count": users_count,
+        "active_users_count": active_users_count,
         "cpu_percent": cpu_percent,
         "process_ram_bytes": process_ram_bytes,
         "total_ram_bytes": total_ram_bytes,
@@ -280,9 +286,11 @@ def _ready_worker_payload(
         worker_id=worker_id,
         status=status,
         users_count=0,
+        active_users_count=0,
         now_ts=now_ts,
     )
     payload.pop("users_count", None)
+    payload.pop("active_users_count", None)
     return payload
 
 

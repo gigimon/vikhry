@@ -10,7 +10,12 @@ from typing import Any, Protocol
 
 from pyreqwest.client import ClientBuilder
 
-from vikhry.runtime.metrics import emit_metric, extract_status_code, is_success_status
+from vikhry.runtime.metrics import (
+    emit_metric,
+    exception_fields,
+    extract_status_code,
+    is_success_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,37 +92,55 @@ class InstrumentedHTTPClient:
         started_at = time.perf_counter()
         status_code: int | None = None
         status = False
-        error_text: str | None = None
+        result_code = "HTTP_EXCEPTION"
+        result_category = "transport_error"
+        error_type: str | None = None
+        error_message: str | None = None
         cancelled = False
 
         try:
             response = await maybe_await(self._client.request(method_name, url, **kwargs))
             status_code = extract_status_code(response)
             status = is_success_status(status_code)
+            if status_code is None:
+                result_code = "HTTP_OK"
+                result_category = "ok"
+            else:
+                result_code = f"HTTP_{status_code}"
+                result_category = "ok" if status else "protocol_error"
             return response
         except asyncio.CancelledError:
             cancelled = True
             raise
         except Exception as exc:  # noqa: BLE001
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_payload = exception_fields(exc)
+            error_type = error_payload["error_type"]
+            error_message = error_payload["error_message"]
+            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                result_code = "HTTP_TIMEOUT"
+                result_category = "timeout"
             raise
         finally:
             if not cancelled:
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000, 3)
                 metric_fields: dict[str, Any] = {
-                    "kind": "http",
                     "method": method_name,
                     "url": url,
                 }
                 if status_code is not None:
                     metric_fields["status_code"] = status_code
-                if error_text is not None:
-                    metric_fields["error"] = error_text
                 try:
                     await emit_metric(
                         name=metric_name,
                         status=status,
                         time=elapsed_ms,
+                        source="http",
+                        stage="execute",
+                        result_code=result_code,
+                        result_category=result_category,
+                        fatal=False,
+                        error_type=error_type,
+                        error_message=error_message,
                         **metric_fields,
                     )
                 except Exception:  # noqa: BLE001
