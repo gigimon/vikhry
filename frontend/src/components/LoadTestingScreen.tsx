@@ -42,7 +42,7 @@ import type {
   WorkersResponse,
 } from '../types/dashboard'
 
-const REFRESH_INTERVAL_MS = 2_000
+const REFRESH_INTERVAL_MS = 1_000
 const ERROR_EVENTS_FETCH_COUNT = 1000
 
 type TabId = 'statistics' | 'charts' | 'errors' | 'resources' | 'workers'
@@ -206,11 +206,6 @@ function metricKind(metric: MetricsResponse['metrics'][number]): string | null {
   return normalizedString(data?.source) ?? null
 }
 
-function isHttpMetric(metric: MetricsResponse['metrics'][number]): boolean {
-  const kind = metricKind(metric)
-  return kind === 'http'
-}
-
 function metricSource(metric: MetricsResponse['metrics'][number]): string {
   return metricKind(metric) ?? 'unknown'
 }
@@ -276,7 +271,11 @@ function readErrorTraceback(data: Record<string, unknown>): string | null {
   return null
 }
 
-function toStatsRows(metrics: MetricsResponse | null, scope: StatsScope): StatsRow[] {
+function toStatsRows(
+  metrics: MetricsResponse | null,
+  scope: StatsScope,
+  rps1sByMetric: Record<string, number>,
+): StatsRow[] {
   if (!metrics) {
     return []
   }
@@ -306,7 +305,7 @@ function toStatsRows(metrics: MetricsResponse | null, scope: StatsScope): StatsR
       p95Ms: aggregate.latency_p95_ms,
       p99Ms: aggregate.latency_p99_ms,
       averageMs: aggregate.latency_avg_ms,
-      rps: aggregate.rps,
+      rps: rps1sByMetric[item.metric_id] ?? 0,
       failureRate: aggregate.error_rate,
       kind,
       stepName,
@@ -541,11 +540,13 @@ function useDashboardData(metricsEventsCount: number) {
   const [workers, setWorkers] = useState<WorkersResponse | null>(null)
   const [resources, setResources] = useState<ResourcesResponse | null>(null)
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
+  const [rps1sByMetric, setRps1sByMetric] = useState<Record<string, number>>({})
   const [history, setHistory] = useState<ChartHistoryPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inFlightRef = useRef(false)
+  const previousTotalsRef = useRef<Map<string, { requests: number; tsMs: number }>>(new Map())
 
   const refresh = useCallback(async () => {
     if (inFlightRef.current) {
@@ -592,6 +593,31 @@ function useDashboardData(metricsEventsCount: number) {
 
     if (metricsResult.status === 'fulfilled') {
       setMetrics(metricsResult.value)
+      const nowMs = Date.now()
+      const previousTotals = previousTotalsRef.current
+      const nextTotals = new Map<string, { requests: number; tsMs: number }>()
+      const nextRpsByMetric: Record<string, number> = {}
+
+      for (const metric of metricsResult.value.metrics) {
+        const metricId = metric.metric_id
+        const totalRequests = metric.aggregate_total.requests
+        const previous = previousTotals.get(metricId)
+        let rps = 0
+
+        if (previous) {
+          const deltaRequests = totalRequests - previous.requests
+          const deltaSeconds = (nowMs - previous.tsMs) / 1000
+          if (deltaRequests >= 0 && deltaSeconds > 0) {
+            rps = deltaRequests / deltaSeconds
+          }
+        }
+
+        nextRpsByMetric[metricId] = roundTo(Math.max(0, rps))
+        nextTotals.set(metricId, { requests: totalRequests, tsMs: nowMs })
+      }
+
+      previousTotalsRef.current = nextTotals
+      setRps1sByMetric(nextRpsByMetric)
     } else {
       pushError('metrics', metricsResult.reason)
     }
@@ -637,6 +663,7 @@ function useDashboardData(metricsEventsCount: number) {
     workers,
     resources,
     metrics,
+    rps1sByMetric,
     history,
     loading,
     refreshing,
@@ -699,6 +726,7 @@ export function LoadTestingScreen() {
     workers,
     resources,
     metrics,
+    rps1sByMetric,
     history,
     error,
     refresh,
@@ -733,7 +761,10 @@ export function LoadTestingScreen() {
     [dismissNotification],
   )
 
-  const rows = useMemo(() => toStatsRows(metrics, statsScope), [metrics, statsScope])
+  const rows = useMemo(
+    () => toStatsRows(metrics, statsScope, rps1sByMetric),
+    [metrics, rps1sByMetric, statsScope],
+  )
 
   const availableSources = useMemo(() => {
     if (!metrics) {
@@ -758,12 +789,12 @@ export function LoadTestingScreen() {
       return 0
     }
     return metrics.metrics.reduce((total, metric) => {
-      if (!isHttpMetric(metric)) {
+      if (metricKind(metric) === 'step') {
         return total
       }
-      return total + metric.aggregate.rps
+      return total + (rps1sByMetric[metric.metric_id] ?? 0)
     }, 0)
-  }, [metrics])
+  }, [metrics, rps1sByMetric])
 
   const errorBreakdown = useMemo<ErrorBreakdownSnapshot>(() => {
     const empty: ErrorBreakdownSnapshot = {

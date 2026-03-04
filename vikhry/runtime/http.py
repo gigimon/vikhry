@@ -19,6 +19,14 @@ from vikhry.runtime.metrics import (
 
 logger = logging.getLogger(__name__)
 
+# Chrome stable desktop (Windows/Mac) on March 3, 2026 is 145.0.7632.159/160.
+# Keep explicit UA close to a real browser fingerprint and append Vikhry marker.
+DEFAULT_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/145.0.7632.160 Safari/537.36 Vikhry"
+)
+
 
 class SupportsHTTP(Protocol):
     async def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
@@ -34,6 +42,7 @@ class ReqwestHTTPClient:
         self.base_url = base_url
         self.timeout = resolved_timeout
         builder = ClientBuilder().timeout(timedelta(seconds=resolved_timeout))
+        builder = builder.user_agent(DEFAULT_HTTP_USER_AGENT)
         if base_url:
             builder = builder.base_url(base_url)
         self._client = builder.build()
