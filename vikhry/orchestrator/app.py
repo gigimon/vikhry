@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -99,6 +100,11 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
 
     @app.startup_handler
     async def on_startup() -> None:
+        await _wait_for_redis_or_retry(
+            redis_client=runtime.redis_client,
+            redis_url=settings.redis_url,
+            retry_delay_s=5.0,
+        )
         await runtime.state_repo.initialize_defaults()
         await runtime.worker_presence.refresh_cache()
         await runtime.metrics_service.start()
@@ -120,3 +126,38 @@ def run_orchestrator(settings: OrchestratorSettings) -> None:
     uvloop.install()
     app, _ = build_app(settings)
     app.start(host=settings.host, port=settings.port)
+
+
+async def _wait_for_redis_or_retry(
+    *,
+    redis_client: redis.Redis,
+    redis_url: str,
+    retry_delay_s: float,
+) -> None:
+    attempt = 1
+    while True:
+        try:
+            await redis_client.ping()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Redis is unavailable (url=%s, attempt=%s): %s. Retrying in %.1fs",
+                redis_url,
+                attempt,
+                exc,
+                retry_delay_s,
+            )
+            attempt += 1
+            await asyncio.sleep(retry_delay_s)
+            continue
+
+        if attempt > 1:
+            logger.info(
+                "Redis connection established after retries (url=%s, attempts=%s)",
+                redis_url,
+                attempt,
+            )
+        else:
+            logger.info("Redis connectivity check passed (url=%s)", redis_url)
+        return

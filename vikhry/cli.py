@@ -264,6 +264,14 @@ def worker_start(
             help="Sleep interval when scenario has no eligible steps.",
         ),
     ] = 0.05,
+    vu_startup_jitter_ms: Annotated[
+        float,
+        typer.Option(
+            "--vu-startup-jitter-ms",
+            min=0.0,
+            help="Max startup jitter per VU in milliseconds (uniform in [0, value]).",
+        ),
+    ] = 5.0,
     detach: Annotated[
         bool,
         typer.Option(
@@ -286,6 +294,7 @@ def worker_start(
         scenario=scenario,
         http_base_url=http_base_url,
         vu_idle_sleep_s=vu_idle_sleep_s,
+        vu_startup_jitter_ms=vu_startup_jitter_ms,
     )
     if detach:
         _start_worker_detached_or_exit(
@@ -338,6 +347,14 @@ def worker_serve(
             help="Sleep interval when scenario has no eligible steps.",
         ),
     ] = 0.05,
+    vu_startup_jitter_ms: Annotated[
+        float,
+        typer.Option(
+            "--vu-startup-jitter-ms",
+            min=0.0,
+            help="Max startup jitter per VU in milliseconds (uniform in [0, value]).",
+        ),
+    ] = 5.0,
     pid_file: Annotated[Path, typer.Option("--pid-file")] = DEFAULT_WORKER_PID_FILE,
 ) -> None:
     settings = WorkerSettings(
@@ -350,6 +367,7 @@ def worker_serve(
         scenario=scenario,
         http_base_url=http_base_url,
         vu_idle_sleep_s=vu_idle_sleep_s,
+        vu_startup_jitter_ms=vu_startup_jitter_ms,
     )
     _run_worker_foreground(settings=settings, pid_file=pid_file)
 
@@ -628,6 +646,8 @@ def _start_worker_detached_or_exit(
         settings.http_base_url,
         "--vu-idle-sleep-s",
         str(settings.vu_idle_sleep_s),
+        "--vu-startup-jitter-ms",
+        str(settings.vu_startup_jitter_ms),
         "--pid-file",
         str(pid_file),
     ]

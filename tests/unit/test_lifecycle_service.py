@@ -15,6 +15,7 @@ class _FakeStateRepo:
         self.epoch = 0
         self.users: list[str] = []
         self.cleared = False
+        self.users_timeline: list[dict[str, object]] = []
 
     async def get_state(self) -> TestState:
         return self.state
@@ -41,6 +42,27 @@ class _FakeStateRepo:
     async def clear_users_data(self) -> None:
         self.users = []
         self.cleared = True
+
+    async def clear_users_timeline(self) -> int:
+        removed = 1 if self.users_timeline else 0
+        self.users_timeline = []
+        return removed
+
+    async def append_users_timeline_event(
+        self,
+        *,
+        epoch: int,
+        users_count: int,
+        source: str,
+    ) -> str:
+        self.users_timeline.append(
+            {
+                "epoch": epoch,
+                "users_count": users_count,
+                "source": source,
+            }
+        )
+        return f"{len(self.users_timeline)}-0"
 
     async def compare_and_set_state(self, expected: TestState, new_state: TestState) -> bool:
         if self.state != expected:
@@ -98,15 +120,18 @@ async def test_lifecycle_happy_path_spec() -> None:
     assert user_orchestration.calls[:2] == ["send_start_test", "add_users"]
     assert repo.state == TestState.RUNNING
     assert len(repo.users) == 3
+    assert repo.users_timeline[-1] == {"epoch": 1, "users_count": 3, "source": "start_test"}
 
     changed = await service.change_users(target_users=1)
     assert changed.action == "remove"
     assert len(repo.users) == 1
+    assert repo.users_timeline[-1] == {"epoch": 1, "users_count": 1, "source": "change_users"}
 
     stopped = await service.stop_test()
     assert stopped.epoch == 1
     assert repo.state == TestState.IDLE
     assert repo.cleared is True
+    assert repo.users_timeline[-1] == {"epoch": 1, "users_count": 0, "source": "stop_test"}
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ import {
   changeUsers,
   createResource,
   fetchMetrics,
+  fetchMetricsHistory,
   fetchReady,
   fetchResources,
   fetchScenarioOnInitSpec,
@@ -34,6 +35,7 @@ import {
 } from '../api/dashboardApi'
 import { ResourceCreateModal } from './ResourceCreateModal'
 import type {
+  MetricsHistoryResponse,
   MetricsResponse,
   ReadyResponse,
   ResourcesResponse,
@@ -58,13 +60,19 @@ type StatsColumnId =
   | 'rps'
   | 'failureRate'
 type LatencySeriesId = 'averageMs' | 'medianMs' | 'p95Ms' | 'p99Ms'
+type ChartRangeId = '5m' | '15m' | '30m' | 'all'
 type NotificationTone = 'info' | 'success' | 'error'
 
 interface ChartHistoryPoint {
   ts: number
-  totalUsers: number
+  totalUsers: number | null
   rpsByMetric: Record<string, number>
-  latencyByType: Record<LatencySeriesId, number | null>
+  latencyByMetric: Record<string, Record<LatencySeriesId, number | null>>
+}
+
+interface ChartMetricOption {
+  id: string
+  source: string
 }
 
 interface NotificationItem {
@@ -123,7 +131,6 @@ const statsColumns: Array<{ id: StatsColumnId; label: string; required?: boolean
 ]
 
 const defaultVisibleColumns = statsColumns.map((column) => column.id)
-const HISTORY_WINDOW_S = 15 * 60
 const NOTIFICATION_TTL_MS = 4_500
 const ERROR_NOTIFICATION_TTL_MS = 7_000
 const rpsLinePalette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4']
@@ -133,6 +140,17 @@ const latencySeriesMeta: Array<{ id: LatencySeriesId; label: string; color: stri
   { id: 'p95Ms', label: 'P95', color: '#f59e0b' },
   { id: 'p99Ms', label: 'P99', color: '#ef4444' },
 ]
+const chartRanges: Array<{ id: ChartRangeId; label: string }> = [
+  { id: '5m', label: '5 minutes' },
+  { id: '15m', label: '15 minutes' },
+  { id: '30m', label: '30 minutes' },
+  { id: 'all', label: 'All time' },
+]
+const chartRangeToSeconds: Record<Exclude<ChartRangeId, 'all'>, number> = {
+  '5m': 5 * 60,
+  '15m': 15 * 60,
+  '30m': 30 * 60,
+}
 
 const numberFormatter = new Intl.NumberFormat('en-US')
 const compactNumberFormatter = new Intl.NumberFormat('en-US', {
@@ -378,29 +396,6 @@ function roundTo(value: number, digits = 1): number {
   return Number(value.toFixed(digits))
 }
 
-function aggregateLatencyByRps(
-  metrics: MetricsResponse,
-  field: 'latency_avg_ms' | 'latency_median_ms' | 'latency_p95_ms' | 'latency_p99_ms',
-): number | null {
-  let weightedSum = 0
-  let totalWeight = 0
-
-  for (const metric of metrics.metrics) {
-    const value = metric.aggregate[field]
-    if (value === null) {
-      continue
-    }
-    const weight = Math.max(metric.aggregate.rps, 1)
-    weightedSum += value * weight
-    totalWeight += weight
-  }
-
-  if (totalWeight <= 0) {
-    return null
-  }
-  return roundTo(weightedSum / totalWeight)
-}
-
 function resolveWorkerActiveUsersCount(worker: WorkersResponse['workers'][number]): number {
   return Math.max(0, Math.floor(worker.active_users_count))
 }
@@ -426,23 +421,50 @@ function buildHistoryPoint(
   workers: WorkersResponse,
   activeWorkerIds: readonly string[] | null,
   generatedAt: number,
+  rpsByMetric: Record<string, number>,
 ): ChartHistoryPoint {
-  const totalUsers = sumUsersForActiveWorkers(workers, activeWorkerIds)
-  const rpsByMetric: Record<string, number> = {}
+  const totalUsers =
+    activeWorkerIds === null ? null : sumUsersForActiveWorkers(workers, activeWorkerIds)
+  const latencyByMetric: Record<string, Record<LatencySeriesId, number | null>> = {}
   for (const metric of metrics.metrics) {
-    rpsByMetric[metric.metric_id] = roundTo(metric.aggregate.rps)
+    const metricId = metric.metric_id
+    latencyByMetric[metricId] = {
+      averageMs: metric.aggregate.latency_avg_ms,
+      medianMs: metric.aggregate.latency_median_ms,
+      p95Ms: metric.aggregate.latency_p95_ms,
+      p99Ms: metric.aggregate.latency_p99_ms,
+    }
   }
 
   return {
     ts: generatedAt,
     totalUsers,
     rpsByMetric,
-    latencyByType: {
-      averageMs: aggregateLatencyByRps(metrics, 'latency_avg_ms'),
-      medianMs: aggregateLatencyByRps(metrics, 'latency_median_ms'),
-      p95Ms: aggregateLatencyByRps(metrics, 'latency_p95_ms'),
-      p99Ms: aggregateLatencyByRps(metrics, 'latency_p99_ms'),
-    },
+    latencyByMetric,
+  }
+}
+
+function mapServerHistoryPoint(
+  point: MetricsHistoryResponse['points'][number],
+): ChartHistoryPoint {
+  const rpsByMetric: Record<string, number> = {}
+  const latencyByMetric: Record<string, Record<LatencySeriesId, number | null>> = {}
+
+  for (const [metricId, metricValues] of Object.entries(point.metrics)) {
+    rpsByMetric[metricId] = metricValues.rps
+    latencyByMetric[metricId] = {
+      averageMs: metricValues.latency_avg_ms,
+      medianMs: metricValues.latency_median_ms,
+      p95Ms: metricValues.latency_p95_ms,
+      p99Ms: metricValues.latency_p99_ms,
+    }
+  }
+
+  return {
+    ts: point.ts,
+    totalUsers: point.users,
+    rpsByMetric,
+    latencyByMetric,
   }
 }
 
@@ -547,6 +569,7 @@ function useDashboardData(metricsEventsCount: number) {
   const [error, setError] = useState<string | null>(null)
   const inFlightRef = useRef(false)
   const previousTotalsRef = useRef<Map<string, { requests: number; tsMs: number }>>(new Map())
+  const lastEpochRef = useRef<number | null>(null)
 
   const refresh = useCallback(async () => {
     if (inFlightRef.current) {
@@ -574,6 +597,15 @@ function useDashboardData(metricsEventsCount: number) {
 
     if (readyResult.status === 'fulfilled') {
       setReady(readyResult.value)
+      const currentEpoch = readyResult.value.epoch
+      if (lastEpochRef.current === null) {
+        lastEpochRef.current = currentEpoch
+      } else if (lastEpochRef.current !== currentEpoch) {
+        lastEpochRef.current = currentEpoch
+        previousTotalsRef.current.clear()
+        setRps1sByMetric({})
+        setHistory([])
+      }
     } else {
       setReady(null)
       pushError('ready', readyResult.reason)
@@ -590,6 +622,8 @@ function useDashboardData(metricsEventsCount: number) {
     } else {
       pushError('resources', resourcesResult.reason)
     }
+
+    let nextRpsByMetricForHistory: Record<string, number> | null = null
 
     if (metricsResult.status === 'fulfilled') {
       setMetrics(metricsResult.value)
@@ -618,23 +652,36 @@ function useDashboardData(metricsEventsCount: number) {
 
       previousTotalsRef.current = nextTotals
       setRps1sByMetric(nextRpsByMetric)
+      nextRpsByMetricForHistory = nextRpsByMetric
     } else {
       pushError('metrics', metricsResult.reason)
     }
 
-    if (metricsResult.status === 'fulfilled' && workersResult.status === 'fulfilled') {
+    const shouldAppendHistory =
+      readyResult.status === 'fulfilled' &&
+      (readyResult.value.state === 'PREPARING' ||
+        readyResult.value.state === 'RUNNING' ||
+        readyResult.value.state === 'STOPPING')
+
+    if (shouldAppendHistory && metricsResult.status === 'fulfilled' && workersResult.status === 'fulfilled') {
       const ts =
         metricsResult.value.generated_at > 0
           ? metricsResult.value.generated_at
           : Math.floor(Date.now() / 1000)
       const activeWorkerIds = readyResult.status === 'fulfilled' ? readyResult.value.workers : null
-      const point = buildHistoryPoint(metricsResult.value, workersResult.value, activeWorkerIds, ts)
+      const point = buildHistoryPoint(
+        metricsResult.value,
+        workersResult.value,
+        activeWorkerIds,
+        ts,
+        nextRpsByMetricForHistory ?? {},
+      )
       setHistory((current) => {
         const merged =
           current.length > 0 && current[current.length - 1].ts === point.ts
             ? [...current.slice(0, -1), point]
             : [...current, point]
-        return merged.filter((item) => ts - item.ts <= HISTORY_WINDOW_S).slice(-600)
+        return merged
       })
     }
 
@@ -674,7 +721,7 @@ function useDashboardData(metricsEventsCount: number) {
 
 export function LoadTestingScreen() {
   const [activeTab, setActiveTab] = useState<TabId>('statistics')
-  const [statsScope, setStatsScope] = useState<StatsScope>('window')
+  const [statsScope, setStatsScope] = useState<StatsScope>('total')
   const [selectedSources, setSelectedSources] = useState<string[]>([])
   const [visibleColumns, setVisibleColumns] = useState<StatsColumnId[]>(defaultVisibleColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
@@ -698,14 +745,19 @@ export function LoadTestingScreen() {
   const [resourceCountInput, setResourceCountInput] = useState('1')
   const [selectedRpsMetrics, setSelectedRpsMetrics] = useState<string[]>([])
   const [rpsSelectionTouched, setRpsSelectionTouched] = useState(false)
-  const [latencySeriesSelection, setLatencySeriesSelection] = useState<
-    Record<LatencySeriesId, { enabled: boolean; users: string }>
-  >({
-    averageMs: { enabled: true, users: 'all' },
-    medianMs: { enabled: false, users: 'all' },
-    p95Ms: { enabled: true, users: 'all' },
-    p99Ms: { enabled: true, users: 'all' },
-  })
+  const [selectedLatencyMetrics, setSelectedLatencyMetrics] = useState<string[]>([])
+  const [latencySelectionTouched, setLatencySelectionTouched] = useState(false)
+  const [selectedLatencyType, setSelectedLatencyType] = useState<LatencySeriesId>('p95Ms')
+  const [selectedChartRange, setSelectedChartRange] = useState<ChartRangeId>('all')
+  const [showUsersOnRpsChart, setShowUsersOnRpsChart] = useState(true)
+  const [serverChartHistory, setServerChartHistory] = useState<ChartHistoryPoint[]>([])
+  const [loadingServerChartHistory, setLoadingServerChartHistory] = useState(false)
+  const [chartEpoch, setChartEpoch] = useState<number | null>(null)
+  const [rpsMetricsOpen, setRpsMetricsOpen] = useState(false)
+  const [rpsUsersOpen, setRpsUsersOpen] = useState(false)
+  const [rpsRangeOpen, setRpsRangeOpen] = useState(false)
+  const [latencyMetricsOpen, setLatencyMetricsOpen] = useState(false)
+  const [latencyTypeOpen, setLatencyTypeOpen] = useState(false)
 
   const [scenarioSpec, setScenarioSpec] = useState<ScenarioOnInitSpec | null>(null)
   const [scenarioLoading, setScenarioLoading] = useState(false)
@@ -716,9 +768,15 @@ export function LoadTestingScreen() {
   const columnsContainerRef = useRef<HTMLDivElement | null>(null)
   const sourcesContainerRef = useRef<HTMLDivElement | null>(null)
   const errorsCategoryContainerRef = useRef<HTMLDivElement | null>(null)
+  const rpsMetricsContainerRef = useRef<HTMLDivElement | null>(null)
+  const rpsUsersContainerRef = useRef<HTMLDivElement | null>(null)
+  const rpsRangeContainerRef = useRef<HTMLDivElement | null>(null)
+  const latencyMetricsContainerRef = useRef<HTMLDivElement | null>(null)
+  const latencyTypeContainerRef = useRef<HTMLDivElement | null>(null)
   const notificationIdRef = useRef(0)
   const notificationTimersRef = useRef<Map<number, number>>(new Map())
   const lastFetchErrorRef = useRef<string | null>(null)
+  const lastServerHistoryTsRef = useRef<number | null>(null)
   const metricsEventsCount = activeTab === 'errors' ? ERROR_EVENTS_FETCH_COUNT : 1
 
   const {
@@ -1003,87 +1061,167 @@ export function LoadTestingScreen() {
     })
   }, [workers])
 
-  const availableMetricIds = useMemo(() => {
-    const ids = new Set<string>()
+  const chartHistory = useMemo(() => {
+    const pointsByTs = new Map<number, ChartHistoryPoint>()
+
+    for (const point of serverChartHistory) {
+      pointsByTs.set(point.ts, {
+        ts: point.ts,
+        totalUsers: point.totalUsers,
+        rpsByMetric: { ...point.rpsByMetric },
+        latencyByMetric: { ...point.latencyByMetric },
+      })
+    }
+
+    for (const point of history) {
+      const existing = pointsByTs.get(point.ts)
+      if (!existing) {
+        pointsByTs.set(point.ts, {
+          ts: point.ts,
+          totalUsers: point.totalUsers,
+          rpsByMetric: { ...point.rpsByMetric },
+          latencyByMetric: { ...point.latencyByMetric },
+        })
+        continue
+      }
+
+      pointsByTs.set(point.ts, {
+        ts: point.ts,
+        totalUsers: point.totalUsers ?? existing.totalUsers,
+        rpsByMetric: existing.rpsByMetric,
+        latencyByMetric: existing.latencyByMetric,
+      })
+    }
+
+    return Array.from(pointsByTs.values()).sort((a, b) => a.ts - b.ts)
+  }, [history, serverChartHistory])
+
+  const availableMetricOptions = useMemo<ChartMetricOption[]>(() => {
+    const optionsById = new Map<string, ChartMetricOption>()
     if (metrics) {
       for (const metric of metrics.metrics) {
-        ids.add(metric.metric_id)
+        optionsById.set(metric.metric_id, {
+          id: metric.metric_id,
+          source: metricKind(metric) ?? 'unknown',
+        })
       }
     }
-    for (const point of history) {
+    for (const point of chartHistory) {
       for (const metricId of Object.keys(point.rpsByMetric)) {
-        ids.add(metricId)
+        if (!optionsById.has(metricId)) {
+          optionsById.set(metricId, { id: metricId, source: 'unknown' })
+        }
       }
     }
-    return Array.from(ids)
-  }, [history, metrics])
 
-  const userCountOptions = useMemo(() => {
-    const values = Array.from(new Set(history.map((point) => point.totalUsers)))
-      .filter((value) => value >= 0)
-      .sort((a, b) => a - b)
-    return values.slice(-12)
-  }, [history])
+    const sourceWeight = (source: string): number => {
+      if (source === 'step') {
+        return 0
+      }
+      if (source === 'http') {
+        return 1
+      }
+      return 2
+    }
 
-  const latencyLineDefs = useMemo(() => {
-    return latencySeriesMeta
-      .filter((meta) => latencySeriesSelection[meta.id].enabled)
-      .map((meta) => {
-        const users = latencySeriesSelection[meta.id].users
-        const key = `${meta.id}::${users}`
-        const label = users === 'all' ? meta.label : `${meta.label} @ ${users} users`
-        return {
-          ...meta,
-          users,
-          key,
-          label,
-        }
-      })
-  }, [latencySeriesSelection])
+    return Array.from(optionsById.values()).sort(
+      (a, b) =>
+        sourceWeight(a.source) - sourceWeight(b.source) ||
+        a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: 'base' }),
+    )
+  }, [chartHistory, metrics])
+
+  const availableMetricIds = useMemo(
+    () => availableMetricOptions.map((option) => option.id),
+    [availableMetricOptions],
+  )
+
+  const visibleHistory = useMemo(() => {
+    if (chartHistory.length === 0 || selectedChartRange === 'all') {
+      return chartHistory
+    }
+    const rangeWindowS = chartRangeToSeconds[selectedChartRange]
+    const lastTs = chartHistory[chartHistory.length - 1].ts
+    const minTs = lastTs - rangeWindowS
+    return chartHistory.filter((point) => point.ts >= minTs)
+  }, [chartHistory, selectedChartRange])
 
   const rpsChartData = useMemo(() => {
-    if (history.length === 0 || selectedRpsMetrics.length === 0) {
+    if (visibleHistory.length === 0 || (selectedRpsMetrics.length === 0 && !showUsersOnRpsChart)) {
       return []
     }
-    return history.map((point) => {
+
+    let previousUsers: number | null = null
+    return visibleHistory.map((point) => {
+      const currentUsers = point.totalUsers
+      const usersChanged =
+        currentUsers !== null && previousUsers !== null && previousUsers !== currentUsers
+      if (currentUsers !== null) {
+        previousUsers = currentUsers
+      }
+      const usersForRow = previousUsers
       const row: Record<string, number | string | null> = {
+        tsMs: point.ts * 1000,
         time: formatChartTime(point.ts),
+        __users: usersForRow,
+        __usersChangeMarker: usersChanged ? usersForRow : null,
       }
       for (const metricId of selectedRpsMetrics) {
         row[metricId] = point.rpsByMetric[metricId] ?? null
       }
       return row
     })
-  }, [history, selectedRpsMetrics])
+  }, [selectedRpsMetrics, showUsersOnRpsChart, visibleHistory])
 
   const latencyChartData = useMemo(() => {
-    if (history.length === 0 || latencyLineDefs.length === 0) {
+    if (visibleHistory.length === 0 || selectedLatencyMetrics.length === 0) {
       return []
     }
-
-    return history.map((point) => {
+    return visibleHistory.map((point) => {
       const row: Record<string, number | string | null> = {
+        tsMs: point.ts * 1000,
         time: formatChartTime(point.ts),
       }
-
-      for (const line of latencyLineDefs) {
-        if (line.users === 'all') {
-          row[line.key] = point.latencyByType[line.id]
-          continue
-        }
-
-        const targetUsers = Number(line.users)
-        const tolerance = Math.max(5, Math.round(targetUsers * 0.05))
-        if (Math.abs(point.totalUsers - targetUsers) <= tolerance) {
-          row[line.key] = point.latencyByType[line.id]
-        } else {
-          row[line.key] = null
-        }
+      for (const metricId of selectedLatencyMetrics) {
+        row[metricId] = point.latencyByMetric[metricId]?.[selectedLatencyType] ?? null
       }
-
       return row
     })
-  }, [history, latencyLineDefs])
+  }, [selectedLatencyMetrics, selectedLatencyType, visibleHistory])
+
+  const selectedChartRangeLabel = useMemo(() => {
+    return chartRanges.find((option) => option.id === selectedChartRange)?.label ?? 'All time'
+  }, [selectedChartRange])
+
+  const selectedLatencyLabel = useMemo(() => {
+    return latencySeriesMeta.find((item) => item.id === selectedLatencyType)?.label ?? 'P95'
+  }, [selectedLatencyType])
+
+  const selectedRpsMetricsSummary = useMemo(() => {
+    if (availableMetricOptions.length === 0) {
+      return 'Metrics'
+    }
+    if (selectedRpsMetrics.length === 0) {
+      return 'No metrics'
+    }
+    if (selectedRpsMetrics.length === 1) {
+      return selectedRpsMetrics[0]
+    }
+    return `${selectedRpsMetrics.length} metrics`
+  }, [availableMetricOptions.length, selectedRpsMetrics])
+
+  const selectedLatencyMetricsSummary = useMemo(() => {
+    if (availableMetricOptions.length === 0) {
+      return 'Metrics'
+    }
+    if (selectedLatencyMetrics.length === 0) {
+      return 'No metrics'
+    }
+    if (selectedLatencyMetrics.length === 1) {
+      return selectedLatencyMetrics[0]
+    }
+    return `${selectedLatencyMetrics.length} metrics`
+  }, [availableMetricOptions.length, selectedLatencyMetrics])
 
   const canStop = ready?.state === 'RUNNING' || ready?.state === 'PREPARING'
   const canStart = ready?.state === 'IDLE'
@@ -1250,6 +1388,11 @@ export function LoadTestingScreen() {
     setColumnsOpen((current) => !current)
     setSourcesOpen(false)
     setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
   }, [])
 
   const toggleSourceFilter = useCallback((source: string) => {
@@ -1272,12 +1415,22 @@ export function LoadTestingScreen() {
     setSourcesOpen((current) => !current)
     setColumnsOpen(false)
     setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
   }, [])
 
   const toggleErrorsCategoryMenu = useCallback(() => {
     setErrorsCategoryOpen((current) => !current)
     setColumnsOpen(false)
     setSourcesOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
   }, [])
 
   const selectErrorsCategory = useCallback((value: string) => {
@@ -1295,30 +1448,99 @@ export function LoadTestingScreen() {
     })
   }, [])
 
-  const toggleLatencySeries = useCallback((seriesId: LatencySeriesId) => {
-    setLatencySeriesSelection((current) => {
-      const enabledCount = latencySeriesMeta.filter((meta) => current[meta.id].enabled).length
-      if (current[seriesId].enabled && enabledCount <= 1) {
-        return current
+  const toggleLatencyMetric = useCallback((metricId: string) => {
+    setLatencySelectionTouched(true)
+    setSelectedLatencyMetrics((current) => {
+      if (current.includes(metricId)) {
+        return current.filter((item) => item !== metricId)
       }
-      return {
-        ...current,
-        [seriesId]: {
-          ...current[seriesId],
-          enabled: !current[seriesId].enabled,
-        },
-      }
+      return [...current, metricId]
     })
   }, [])
 
-  const setLatencyUsers = useCallback((seriesId: LatencySeriesId, users: string) => {
-    setLatencySeriesSelection((current) => ({
-      ...current,
-      [seriesId]: {
-        ...current[seriesId],
-        users,
-      },
-    }))
+  const toggleRpsMetricsMenu = useCallback(() => {
+    setRpsMetricsOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
+  }, [])
+
+  const toggleRpsUsersMenu = useCallback(() => {
+    setRpsUsersOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
+  }, [])
+
+  const toggleRpsRangeMenu = useCallback(() => {
+    setRpsRangeOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setLatencyMetricsOpen(false)
+    setLatencyTypeOpen(false)
+  }, [])
+
+  const toggleLatencyMetricsMenu = useCallback(() => {
+    setLatencyMetricsOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyTypeOpen(false)
+  }, [])
+
+  const toggleLatencyTypeMenu = useCallback(() => {
+    setLatencyTypeOpen((current) => !current)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+    setErrorsCategoryOpen(false)
+    setRpsMetricsOpen(false)
+    setRpsUsersOpen(false)
+    setRpsRangeOpen(false)
+    setLatencyMetricsOpen(false)
+  }, [])
+
+  const setChartRange = useCallback((range: ChartRangeId) => {
+    setSelectedChartRange(range)
+    setRpsRangeOpen(false)
+  }, [])
+
+  const selectLatencyType = useCallback((value: LatencySeriesId) => {
+    setSelectedLatencyType(value)
+    setLatencyTypeOpen(false)
+  }, [])
+
+  const selectAllRpsMetrics = useCallback(() => {
+    setRpsSelectionTouched(true)
+    setSelectedRpsMetrics(availableMetricIds)
+  }, [availableMetricIds])
+
+  const clearRpsMetrics = useCallback(() => {
+    setRpsSelectionTouched(true)
+    setSelectedRpsMetrics([])
+  }, [])
+
+  const selectAllLatencyMetrics = useCallback(() => {
+    setLatencySelectionTouched(true)
+    setSelectedLatencyMetrics(availableMetricIds)
+  }, [availableMetricIds])
+
+  const clearLatencyMetrics = useCallback(() => {
+    setLatencySelectionTouched(true)
+    setSelectedLatencyMetrics([])
   }, [])
 
   useEffect(() => {
@@ -1345,7 +1567,108 @@ export function LoadTestingScreen() {
   }, [selectedTracebackCategory, tracebackCategories])
 
   useEffect(() => {
-    if (!columnsOpen && !sourcesOpen && !errorsCategoryOpen) {
+    if (typeof ready?.epoch !== 'number') {
+      return
+    }
+    setChartEpoch((current) => (current === ready.epoch ? current : ready.epoch))
+  }, [ready?.epoch])
+
+  useEffect(() => {
+    if (activeTab !== 'charts') {
+      return
+    }
+
+    let cancelled = false
+
+    const loadServerChartHistory = async () => {
+      try {
+        setLoadingServerChartHistory(true)
+        const response = await fetchMetricsHistory(selectedChartRange)
+        if (cancelled) {
+          return
+        }
+        const mappedPoints = response.points.map(mapServerHistoryPoint)
+        setServerChartHistory(mappedPoints)
+        lastServerHistoryTsRef.current =
+          mappedPoints.length > 0 ? mappedPoints[mappedPoints.length - 1].ts : null
+      } catch (historyError) {
+        if (cancelled) {
+          return
+        }
+        pushNotification(
+          'error',
+          historyError instanceof Error
+            ? historyError.message
+            : 'Failed to load charts history',
+        )
+      } finally {
+        if (!cancelled) {
+          setLoadingServerChartHistory(false)
+        }
+      }
+    }
+
+    void loadServerChartHistory()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab, chartEpoch, pushNotification, selectedChartRange])
+
+  useEffect(() => {
+    if (activeTab !== 'charts' || selectedChartRange !== 'all' || loadingServerChartHistory) {
+      return
+    }
+
+    let cancelled = false
+
+    const pullIncrementalHistory = async () => {
+      try {
+        const fromTs =
+          lastServerHistoryTsRef.current === null ? undefined : lastServerHistoryTsRef.current + 1
+        const response = await fetchMetricsHistory('all', { fromTs })
+        if (cancelled || response.points.length === 0) {
+          return
+        }
+
+        const mappedPoints = response.points.map(mapServerHistoryPoint)
+        setServerChartHistory((current) => {
+          const pointsByTs = new Map<number, ChartHistoryPoint>()
+          for (const point of current) {
+            pointsByTs.set(point.ts, point)
+          }
+          for (const point of mappedPoints) {
+            pointsByTs.set(point.ts, point)
+          }
+          return Array.from(pointsByTs.values()).sort((a, b) => a.ts - b.ts)
+        })
+        lastServerHistoryTsRef.current = mappedPoints[mappedPoints.length - 1].ts
+      } catch {
+        // keep charts responsive even if incremental history fetch fails temporarily
+      }
+    }
+
+    const timerId = window.setInterval(() => {
+      void pullIncrementalHistory()
+    }, REFRESH_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timerId)
+    }
+  }, [activeTab, loadingServerChartHistory, selectedChartRange])
+
+  useEffect(() => {
+    if (
+      !columnsOpen &&
+      !sourcesOpen &&
+      !errorsCategoryOpen &&
+      !rpsMetricsOpen &&
+      !rpsUsersOpen &&
+      !rpsRangeOpen &&
+      !latencyMetricsOpen &&
+      !latencyTypeOpen
+    ) {
       return
     }
 
@@ -1360,13 +1683,37 @@ export function LoadTestingScreen() {
       if (errorsCategoryOpen && !errorsCategoryContainerRef.current?.contains(target)) {
         setErrorsCategoryOpen(false)
       }
+      if (rpsMetricsOpen && !rpsMetricsContainerRef.current?.contains(target)) {
+        setRpsMetricsOpen(false)
+      }
+      if (rpsUsersOpen && !rpsUsersContainerRef.current?.contains(target)) {
+        setRpsUsersOpen(false)
+      }
+      if (rpsRangeOpen && !rpsRangeContainerRef.current?.contains(target)) {
+        setRpsRangeOpen(false)
+      }
+      if (latencyMetricsOpen && !latencyMetricsContainerRef.current?.contains(target)) {
+        setLatencyMetricsOpen(false)
+      }
+      if (latencyTypeOpen && !latencyTypeContainerRef.current?.contains(target)) {
+        setLatencyTypeOpen(false)
+      }
     }
 
     window.addEventListener('pointerdown', onPointerDown)
     return () => {
       window.removeEventListener('pointerdown', onPointerDown)
     }
-  }, [columnsOpen, errorsCategoryOpen, sourcesOpen])
+  }, [
+    columnsOpen,
+    errorsCategoryOpen,
+    latencyMetricsOpen,
+    latencyTypeOpen,
+    rpsMetricsOpen,
+    rpsRangeOpen,
+    rpsUsersOpen,
+    sourcesOpen,
+  ])
 
   useEffect(() => {
     if (!error) {
@@ -1408,28 +1755,27 @@ export function LoadTestingScreen() {
       if (rpsSelectionTouched) {
         return filtered
       }
-      return availableMetricIds.slice(0, Math.min(3, availableMetricIds.length))
+      return availableMetricIds.slice(0, Math.min(4, availableMetricIds.length))
     })
   }, [availableMetricIds, rpsSelectionTouched])
 
   useEffect(() => {
-    if (userCountOptions.length === 0) {
+    if (availableMetricIds.length === 0) {
+      setSelectedLatencyMetrics([])
       return
     }
 
-    setLatencySeriesSelection((current) => {
-      let changed = false
-      const next = { ...current }
-      for (const meta of latencySeriesMeta) {
-        const selectedUsers = current[meta.id].users
-        if (selectedUsers !== 'all' && !userCountOptions.includes(Number(selectedUsers))) {
-          next[meta.id] = { ...next[meta.id], users: 'all' }
-          changed = true
-        }
+    setSelectedLatencyMetrics((current) => {
+      const filtered = current.filter((metricId) => availableMetricIds.includes(metricId))
+      if (filtered.length > 0) {
+        return filtered
       }
-      return changed ? next : current
+      if (latencySelectionTouched) {
+        return filtered
+      }
+      return availableMetricIds.slice(0, Math.min(4, availableMetricIds.length))
     })
-  }, [userCountOptions])
+  }, [availableMetricIds, latencySelectionTouched])
 
   useEffect(() => {
     if (!startModalOpen) {
@@ -2034,72 +2380,169 @@ export function LoadTestingScreen() {
           <>
             <section className="section-header">
               <h1>Test Charts</h1>
+              <div className="columns-control" ref={rpsRangeContainerRef}>
+                <button className="btn" type="button" onClick={toggleRpsRangeMenu}>
+                  <span>{selectedChartRangeLabel}</span>
+                  <ChevronDown size={12} />
+                </button>
+                {rpsRangeOpen ? (
+                  <div className="columns-menu">
+                    {chartRanges.map((range) => (
+                      <button
+                        key={range.id}
+                        type="button"
+                        className={
+                          selectedChartRange === range.id
+                            ? 'columns-menu__option columns-menu__option--active'
+                            : 'columns-menu__option'
+                        }
+                        onClick={() => setChartRange(range.id)}
+                      >
+                        {range.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </section>
 
             <section className="chart-grid">
               <article className="chart-card">
                 <header className="chart-card__header">
                   <h2>Requests Per Second (RPS)</h2>
-                  <div className="chart-card__actions">
-                    <button
-                      className="btn btn--ghost"
-                      type="button"
-                      onClick={() => {
-                        setRpsSelectionTouched(true)
-                        setSelectedRpsMetrics(availableMetricIds)
-                      }}
-                    >
-                      Select all
-                    </button>
-                    <button
-                      className="btn btn--ghost"
-                      type="button"
-                      onClick={() => {
-                        setRpsSelectionTouched(true)
-                        setSelectedRpsMetrics([])
-                      }}
-                    >
-                      Clear
-                    </button>
+                  <div className="chart-card__actions chart-card__actions--dropdowns">
+                    <div className="columns-control" ref={rpsUsersContainerRef}>
+                      <button className="btn btn--ghost" type="button" onClick={toggleRpsUsersMenu}>
+                        <span>{showUsersOnRpsChart ? 'Users: On' : 'Users: Off'}</span>
+                        <ChevronDown size={12} />
+                      </button>
+                      {rpsUsersOpen ? (
+                        <div className="columns-menu">
+                          <button
+                            type="button"
+                            className={
+                              showUsersOnRpsChart
+                                ? 'columns-menu__option columns-menu__option--active'
+                                : 'columns-menu__option'
+                            }
+                            onClick={() => {
+                              setShowUsersOnRpsChart(true)
+                              setRpsUsersOpen(false)
+                            }}
+                          >
+                            Show users
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              !showUsersOnRpsChart
+                                ? 'columns-menu__option columns-menu__option--active'
+                                : 'columns-menu__option'
+                            }
+                            onClick={() => {
+                              setShowUsersOnRpsChart(false)
+                              setRpsUsersOpen(false)
+                            }}
+                          >
+                            Hide users
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="columns-control" ref={rpsMetricsContainerRef}>
+                      <button className="btn btn--ghost" type="button" onClick={toggleRpsMetricsMenu}>
+                        <span>{selectedRpsMetricsSummary}</span>
+                        <ChevronDown size={12} />
+                      </button>
+                      {rpsMetricsOpen ? (
+                        <div className="columns-menu chart-menu">
+                          <div className="chart-menu__actions">
+                            <button type="button" className="columns-menu__action" onClick={selectAllRpsMetrics}>
+                              Select all
+                            </button>
+                            <button type="button" className="columns-menu__action" onClick={clearRpsMetrics}>
+                              Clear
+                            </button>
+                          </div>
+
+                          {['step', 'http', 'other'].map((group) => {
+                            const groupOptions = availableMetricOptions.filter((option) =>
+                              group === 'other'
+                                ? option.source !== 'step' && option.source !== 'http'
+                                : option.source === group,
+                            )
+                            if (groupOptions.length === 0) {
+                              return null
+                            }
+
+                            const groupLabel =
+                              group === 'step' ? 'Step metrics' : group === 'http' ? 'HTTP metrics' : 'Other metrics'
+
+                            return (
+                              <div key={group} className="chart-menu__group">
+                                <p className="chart-menu__group-label">{groupLabel}</p>
+                                {groupOptions.map((option) => (
+                                  <label key={option.id} className="columns-menu__item">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedRpsMetrics.includes(option.id)}
+                                      onChange={() => toggleRpsMetric(option.id)}
+                                    />
+                                    <span>{option.id}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </header>
 
-                <div className="chart-filter-list">
-                  {availableMetricIds.length === 0 ? (
-                    <p className="chart-empty">No endpoints in metrics stream yet.</p>
-                  ) : (
-                    availableMetricIds.map((metricId) => (
-                      <label className="chart-filter-chip" key={metricId}>
-                        <input
-                          type="checkbox"
-                          checked={selectedRpsMetrics.includes(metricId)}
-                          onChange={() => toggleRpsMetric(metricId)}
-                        />
-                        <span>{metricId}</span>
-                      </label>
-                    ))
-                  )}
-                </div>
-
                 <div className="chart-canvas">
-                  {rpsChartData.length === 0 || selectedRpsMetrics.length === 0 ? (
-                    <p className="chart-empty">Select endpoints to render RPS chart.</p>
+                  {rpsChartData.length === 0 || (selectedRpsMetrics.length === 0 && !showUsersOnRpsChart) ? (
+                    <p className="chart-empty">
+                      {loadingServerChartHistory
+                        ? 'Loading chart history...'
+                        : 'Select metrics or enable users line.'}
+                    </p>
                   ) : (
                     <ResponsiveContainer width="100%" height={290}>
                       <LineChart data={rpsChartData}>
                         <CartesianGrid strokeDasharray="4 4" stroke="#e2e8f0" />
-                        <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-                        <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                        <XAxis
+                          dataKey="tsMs"
+                          type="number"
+                          domain={['dataMin', 'dataMax']}
+                          tick={{ fontSize: 11, fill: '#94a3b8' }}
+                          tickFormatter={(value) => formatChartTime(Math.floor(Number(value) / 1000))}
+                          minTickGap={24}
+                        />
+                        <YAxis yAxisId="rps" domain={[0, 'auto']} tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                        {showUsersOnRpsChart ? (
+                          <YAxis
+                            yAxisId="users"
+                            orientation="right"
+                            domain={[0, 'auto']}
+                            tick={{ fontSize: 11, fill: '#7c3aed' }}
+                          />
+                        ) : null}
                         <Tooltip
                           contentStyle={{
                             borderRadius: 8,
                             border: '1px solid #e2e8f0',
                             fontSize: 12,
                           }}
-                          formatter={(value) => {
+                          labelFormatter={(value) => formatChartTime(Math.floor(Number(value) / 1000))}
+                          formatter={(value, name) => {
                             const numeric = typeof value === 'number' ? value : Number(value)
                             if (!Number.isFinite(numeric)) {
                               return '—'
+                            }
+                            if (name === 'Users') {
+                              return `${numberFormatter.format(Math.round(numeric))} users`
                             }
                             return `${numeric.toFixed(1)} RPS`
                           }}
@@ -2110,13 +2553,43 @@ export function LoadTestingScreen() {
                             key={metricId}
                             type="monotone"
                             dataKey={metricId}
+                            yAxisId="rps"
                             name={metricId}
                             stroke={rpsLinePalette[index % rpsLinePalette.length]}
                             strokeWidth={2}
                             dot={false}
+                            isAnimationActive={false}
                             connectNulls
                           />
                         ))}
+                        {showUsersOnRpsChart ? (
+                          <>
+                            <Line
+                              type="stepAfter"
+                              dataKey="__users"
+                              yAxisId="users"
+                              name="Users"
+                              stroke="#7c3aed"
+                              strokeWidth={2}
+                              dot={false}
+                              isAnimationActive={false}
+                              connectNulls
+                            />
+                            <Line
+                              type="linear"
+                              dataKey="__usersChangeMarker"
+                              yAxisId="users"
+                              name="Users changed"
+                              stroke="transparent"
+                              strokeWidth={0}
+                              dot={{ r: 3, fill: '#7c3aed', strokeWidth: 0 }}
+                              activeDot={false}
+                              isAnimationActive={false}
+                              connectNulls={false}
+                              legendType="none"
+                            />
+                          </>
+                        ) : null}
                       </LineChart>
                     </ResponsiveContainer>
                   )}
@@ -2126,52 +2599,110 @@ export function LoadTestingScreen() {
               <article className="chart-card">
                 <header className="chart-card__header">
                   <h2>Latency (ms)</h2>
+                  <div className="chart-card__actions chart-card__actions--dropdowns">
+                    <div className="columns-control" ref={latencyTypeContainerRef}>
+                      <button className="btn btn--ghost" type="button" onClick={toggleLatencyTypeMenu}>
+                        <span>{selectedLatencyLabel}</span>
+                        <ChevronDown size={12} />
+                      </button>
+                      {latencyTypeOpen ? (
+                        <div className="columns-menu">
+                          {latencySeriesMeta.map((series) => (
+                            <button
+                              key={series.id}
+                              type="button"
+                              className={
+                                selectedLatencyType === series.id
+                                  ? 'columns-menu__option columns-menu__option--active'
+                                  : 'columns-menu__option'
+                              }
+                              onClick={() => selectLatencyType(series.id)}
+                            >
+                              {series.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="columns-control" ref={latencyMetricsContainerRef}>
+                      <button className="btn btn--ghost" type="button" onClick={toggleLatencyMetricsMenu}>
+                        <span>{selectedLatencyMetricsSummary}</span>
+                        <ChevronDown size={12} />
+                      </button>
+                      {latencyMetricsOpen ? (
+                        <div className="columns-menu chart-menu">
+                          <div className="chart-menu__actions">
+                            <button type="button" className="columns-menu__action" onClick={selectAllLatencyMetrics}>
+                              Select all
+                            </button>
+                            <button type="button" className="columns-menu__action" onClick={clearLatencyMetrics}>
+                              Clear
+                            </button>
+                          </div>
+
+                          {['step', 'http', 'other'].map((group) => {
+                            const groupOptions = availableMetricOptions.filter((option) =>
+                              group === 'other'
+                                ? option.source !== 'step' && option.source !== 'http'
+                                : option.source === group,
+                            )
+                            if (groupOptions.length === 0) {
+                              return null
+                            }
+
+                            const groupLabel =
+                              group === 'step' ? 'Step metrics' : group === 'http' ? 'HTTP metrics' : 'Other metrics'
+
+                            return (
+                              <div key={group} className="chart-menu__group">
+                                <p className="chart-menu__group-label">{groupLabel}</p>
+                                {groupOptions.map((option) => (
+                                  <label key={option.id} className="columns-menu__item">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedLatencyMetrics.includes(option.id)}
+                                      onChange={() => toggleLatencyMetric(option.id)}
+                                    />
+                                    <span>{option.id}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
                 </header>
 
-                <div className="latency-controls">
-                  {latencySeriesMeta.map((series) => (
-                    <div className="latency-controls__row" key={series.id}>
-                      <label className="chart-filter-chip chart-filter-chip--latency">
-                        <input
-                          type="checkbox"
-                          checked={latencySeriesSelection[series.id].enabled}
-                          onChange={() => toggleLatencySeries(series.id)}
-                        />
-                        <span>{series.label}</span>
-                      </label>
-
-                      <select
-                        className="latency-users-select"
-                        value={latencySeriesSelection[series.id].users}
-                        onChange={(event) => setLatencyUsers(series.id, event.target.value)}
-                        disabled={!latencySeriesSelection[series.id].enabled}
-                      >
-                        <option value="all">All users</option>
-                        {userCountOptions.map((usersCount) => (
-                          <option value={String(usersCount)} key={usersCount}>
-                            {numberFormatter.format(usersCount)} users
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-
                 <div className="chart-canvas">
-                  {latencyChartData.length === 0 || latencyLineDefs.length === 0 ? (
-                    <p className="chart-empty">Enable latency series to render chart.</p>
+                  {latencyChartData.length === 0 || selectedLatencyMetrics.length === 0 ? (
+                    <p className="chart-empty">
+                      {loadingServerChartHistory
+                        ? 'Loading chart history...'
+                        : 'Select metrics for latency chart.'}
+                    </p>
                   ) : (
                     <ResponsiveContainer width="100%" height={290}>
                       <LineChart data={latencyChartData}>
                         <CartesianGrid strokeDasharray="4 4" stroke="#e2e8f0" />
-                        <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-                        <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                        <XAxis
+                          dataKey="tsMs"
+                          type="number"
+                          domain={['dataMin', 'dataMax']}
+                          tick={{ fontSize: 11, fill: '#94a3b8' }}
+                          tickFormatter={(value) => formatChartTime(Math.floor(Number(value) / 1000))}
+                          minTickGap={24}
+                        />
+                        <YAxis domain={[0, 'auto']} tick={{ fontSize: 11, fill: '#94a3b8' }} />
                         <Tooltip
                           contentStyle={{
                             borderRadius: 8,
                             border: '1px solid #e2e8f0',
                             fontSize: 12,
                           }}
+                          labelFormatter={(value) => formatChartTime(Math.floor(Number(value) / 1000))}
                           formatter={(value) => {
                             const numeric = typeof value === 'number' ? value : Number(value)
                             if (!Number.isFinite(numeric)) {
@@ -2181,15 +2712,16 @@ export function LoadTestingScreen() {
                           }}
                         />
                         <Legend wrapperStyle={{ fontSize: 12 }} />
-                        {latencyLineDefs.map((line) => (
+                        {selectedLatencyMetrics.map((metricId, index) => (
                           <Line
-                            key={line.key}
+                            key={metricId}
                             type="monotone"
-                            dataKey={line.key}
-                            name={line.label}
-                            stroke={line.color}
+                            dataKey={metricId}
+                            name={metricId}
+                            stroke={rpsLinePalette[index % rpsLinePalette.length]}
                             strokeWidth={2}
                             dot={false}
+                            isAnimationActive={false}
                             connectNulls
                           />
                         ))}

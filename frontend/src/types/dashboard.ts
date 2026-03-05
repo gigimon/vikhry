@@ -73,6 +73,28 @@ export interface MetricsResponse {
   include_events: boolean
 }
 
+export interface MetricsHistoryResponse {
+  generated_at: number
+  range: '5m' | '15m' | '30m' | 'all'
+  from_ts: number | null
+  count: number
+  points: Array<{
+    ts: number
+    users: number | null
+    metrics: Record<
+      string,
+      {
+        rps: number
+        latency_avg_ms: number | null
+        latency_median_ms: number | null
+        latency_p95_ms: number | null
+        latency_p99_ms: number | null
+      }
+    >
+  }>
+  duration_ms: number
+}
+
 export interface StatsRow {
   name: string
   isNested?: boolean

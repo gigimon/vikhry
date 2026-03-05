@@ -33,16 +33,16 @@ async def run_worker_async(settings: WorkerSettings) -> None:
     _install_signal_handlers(shutdown_event)
 
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
-    try:
-        await redis_client.ping()
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "worker failed to connect to redis (worker_id=%s, redis_url=%s)",
-            settings.worker_id,
-            settings.redis_url,
-        )
+    connected = await _wait_for_redis_or_retry(
+        redis_client=redis_client,
+        redis_url=settings.redis_url,
+        retry_delay_s=5.0,
+        worker_id=settings.worker_id,
+        shutdown_event=shutdown_event,
+    )
+    if not connected:
         await redis_client.aclose()
-        raise
+        return
     logger.info(
         "worker connected to redis (worker_id=%s, redis_url=%s)",
         settings.worker_id,
@@ -57,6 +57,7 @@ async def run_worker_async(settings: WorkerSettings) -> None:
         vu_type=vu_type,
         http_base_url=settings.http_base_url,
         idle_sleep_s=settings.vu_idle_sleep_s,
+        startup_jitter_s=max(0.0, settings.vu_startup_jitter_ms / 1000.0),
     )
     heartbeat = WorkerHeartbeatService(
         state_repo=state_repo,
@@ -124,3 +125,54 @@ def _configure_logging(log_level: str) -> None:
     )
     if invalid_level:
         logger.warning("unknown log level `%s`, falling back to INFO", log_level)
+
+
+async def _wait_for_redis_or_retry(
+    *,
+    redis_client: redis.Redis,
+    redis_url: str,
+    retry_delay_s: float,
+    worker_id: str,
+    shutdown_event: asyncio.Event | None = None,
+) -> bool:
+    attempt = 1
+    while True:
+        try:
+            await redis_client.ping()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "worker failed to connect to redis "
+                "(worker_id=%s, redis_url=%s, attempt=%s): %s. Retrying in %.1fs",
+                worker_id,
+                redis_url,
+                attempt,
+                exc,
+                retry_delay_s,
+            )
+            attempt += 1
+            if shutdown_event is None:
+                await asyncio.sleep(retry_delay_s)
+                continue
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=retry_delay_s)
+            except TimeoutError:
+                continue
+            logger.info(
+                "worker shutdown requested while waiting for redis "
+                "(worker_id=%s, redis_url=%s)",
+                worker_id,
+                redis_url,
+            )
+            return False
+
+        if attempt > 1:
+            logger.info(
+                "worker connected to redis after retries "
+                "(worker_id=%s, redis_url=%s, attempts=%s)",
+                worker_id,
+                redis_url,
+                attempt,
+            )
+        return True

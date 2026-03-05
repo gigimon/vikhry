@@ -30,6 +30,7 @@ class WorkerVURuntime:
         http_base_url: str = "",
         metric_id: str | None = None,
         idle_sleep_s: float = 0.05,
+        startup_jitter_s: float = 0.005,
     ) -> None:
         self._state_repo = state_repo
         self._worker_id = worker_id
@@ -37,6 +38,7 @@ class WorkerVURuntime:
         self._http_base_url = http_base_url
         self._metric_id = metric_id or f"worker:{worker_id}"
         self._idle_sleep_s = max(0.01, idle_sleep_s)
+        self._startup_jitter_s = max(0.0, startup_jitter_s)
         self._metrics = WorkerMetricsPublisher(
             state_repo,
             worker_id=self._worker_id,
@@ -48,6 +50,12 @@ class WorkerVURuntime:
         user_id: str,
         init_params: dict[str, Any] | None = None,
     ) -> None:
+        if self._startup_jitter_s > 0:
+            startup_rng = random.Random(f"{self._worker_id}:{user_id}:startup_jitter")
+            jitter_delay_s = startup_rng.uniform(0.0, self._startup_jitter_s)
+            if jitter_delay_s > 0:
+                await asyncio.sleep(jitter_delay_s)
+
         resources = WorkerVUResources(self._state_repo)
         vu = self._vu_type(
             user_id=user_id,

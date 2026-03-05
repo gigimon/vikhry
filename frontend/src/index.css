@@ -544,35 +544,9 @@ body {
   gap: 8px;
 }
 
-.chart-filter-list {
-  display: flex;
-  align-items: center;
+.chart-card__actions--dropdowns {
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.chart-filter-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid #dbe4ee;
-  border-radius: 999px;
-  min-height: 28px;
-  padding: 0 10px;
-  background: #ffffff;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.chart-filter-chip input {
-  margin: 0;
-}
-
-.chart-filter-chip--latency {
-  border-radius: 7px;
-  min-width: 120px;
+  justify-content: flex-end;
 }
 
 .chart-canvas {
@@ -589,27 +563,36 @@ body {
   place-items: center;
 }
 
-.latency-controls {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 10px;
+.chart-menu {
+  min-width: 250px;
+  max-height: 330px;
+  overflow: auto;
 }
 
-.latency-controls__row {
+.chart-menu__actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid #e2e8f0;
 }
 
-.latency-users-select {
-  height: 30px;
-  border: 1px solid #dbe4ee;
-  border-radius: 7px;
-  background: #ffffff;
-  color: #334155;
-  font-size: 12px;
-  padding: 0 9px;
+.chart-menu__actions .columns-menu__action {
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.chart-menu__group + .chart-menu__group {
+  margin-top: 6px;
+}
+
+.chart-menu__group-label {
+  margin: 4px 8px;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .table-action-btn {
@@ -1137,11 +1120,6 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .latency-controls__row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .errors-controls {
     width: 100%;
     justify-content: flex-start;
@@ -1152,8 +1130,14 @@ body {
     justify-content: space-between;
   }
 
-  .chart-filter-chip--latency {
-    min-width: 0;
+  .chart-card__actions--dropdowns {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .chart-card__actions--dropdowns .btn {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .modal-overlay {

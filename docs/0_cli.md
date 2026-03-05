@@ -35,6 +35,7 @@ Worker runtime-опции сценария:
 - `--scenario module.path:ClassName` — класс VU для запуска (default `vikhry.runtime.defaults:IdleVU`);
 - `--http-base-url` — base URL для относительных HTTP шагов;
 - `--vu-idle-sleep-s` — idle sleep интервал VU loop.
+- `--vu-startup-jitter-ms` — максимальный случайный стартовый сдвиг VU в миллисекундах (default `5`).
 
 Orchestrator runtime-опция сценария:
 - `--scenario module.path:ClassName` — тот же формат импорта, что и у worker; используется для извлечения `@resource` и сигнатуры `VU.on_init`.

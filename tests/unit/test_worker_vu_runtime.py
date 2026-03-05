@@ -167,6 +167,17 @@ class _StartFailVU(VU):
         await asyncio.sleep(0)
 
 
+class _StartupJitterProbeVU(VU):
+    on_init_started_at: list[float] = []
+
+    async def on_init(self, **_kwargs: Any) -> None:
+        self.__class__.on_init_started_at.append(time.monotonic())
+
+    @step(every_s=0.01)
+    async def ping(self) -> None:
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     _MetricsVU.started.clear()
@@ -385,3 +396,25 @@ async def test_runtime_does_not_run_steps_when_on_start_fails_spec() -> None:
     assert event["result_category"] == "exception"
     assert event["fatal"] is True
     assert repo.active_users == set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_applies_startup_jitter_before_on_init_spec() -> None:
+    _StartupJitterProbeVU.on_init_started_at.clear()
+    repo = _FakeRepo()
+    runtime = WorkerVURuntime(
+        repo,  # type: ignore[arg-type]
+        worker_id="w1",
+        vu_type=_StartupJitterProbeVU,
+        idle_sleep_s=0.01,
+        startup_jitter_s=0.03,
+    )
+
+    started_at = time.monotonic()
+    task = asyncio.create_task(runtime.run_user("user-1"))
+    await _wait_until(lambda: bool(_StartupJitterProbeVU.on_init_started_at))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    elapsed_s = _StartupJitterProbeVU.on_init_started_at[0] - started_at
+    assert elapsed_s >= 0.01

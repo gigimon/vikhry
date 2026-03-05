@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import math
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -169,6 +171,32 @@ def register_routes(
                 count=count,
                 include_events=include_events,
             )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
+    @app.get("/metrics/history")
+    async def metrics_history(request: Request) -> dict[str, object] | Response:
+        try:
+            range_id = _query_value(request, "range") or "all"
+            now_ts = worker_presence.now_ts()
+            from_ts = _resolve_history_from_ts(now_ts=now_ts, range_id=range_id)
+            explicit_from_ts = _query_optional_int(
+                request=request,
+                key="from_ts",
+                min_value=0,
+                max_value=4_102_444_800,
+            )
+            if explicit_from_ts is not None:
+                from_ts = explicit_from_ts
+            started_at = time.perf_counter()
+            result = await _build_metrics_history_response(
+                state_repo=state_repo,
+                now_ts=now_ts,
+                from_ts=from_ts,
+                range_id=range_id,
+            )
+            result["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
             return result
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)
@@ -454,3 +482,267 @@ def _query_bool(request: Request, key: str, default: bool) -> bool:
         code="validation_error",
         message=f"Query param `{key}` must be boolean",
     )
+
+
+def _query_optional_int(
+    *,
+    request: Request,
+    key: str,
+    min_value: int,
+    max_value: int,
+) -> int | None:
+    raw_value = _query_value(request, key)
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ApiError(
+            status=400,
+            code="validation_error",
+            message=f"Query param `{key}` must be integer",
+        ) from exc
+    if value < min_value or value > max_value:
+        raise ApiError(
+            status=400,
+            code="validation_error",
+            message=f"Query param `{key}` must be in [{min_value}, {max_value}]",
+        )
+    return value
+
+
+def _resolve_history_from_ts(*, now_ts: int, range_id: str) -> int | None:
+    window_by_range: dict[str, int | None] = {
+        "5m": 5 * 60,
+        "15m": 15 * 60,
+        "30m": 30 * 60,
+        "all": None,
+    }
+    if range_id not in window_by_range:
+        raise ApiError(
+            status=400,
+            code="validation_error",
+            message="Query param `range` must be one of: 5m, 15m, 30m, all",
+        )
+    window_s = window_by_range[range_id]
+    if window_s is None:
+        return None
+    return max(0, now_ts - window_s)
+
+
+def _parse_metric_event_second(event_id: str) -> int | None:
+    raw_timestamp = event_id.split("-", maxsplit=1)[0]
+    try:
+        timestamp_ms = int(raw_timestamp)
+    except ValueError:
+        return None
+    return max(0, int(timestamp_ms / 1000))
+
+
+def _extract_latency_value(event_payload: dict[str, Any]) -> float | None:
+    raw = event_payload.get("time")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _sorted_median(sorted_values: list[float]) -> float | None:
+    if not sorted_values:
+        return None
+    size = len(sorted_values)
+    middle = size // 2
+    if size % 2:
+        return sorted_values[middle]
+    return (sorted_values[middle - 1] + sorted_values[middle]) / 2
+
+
+def _sorted_percentile_nearest_rank(
+    sorted_values: list[float],
+    *,
+    percentile: int,
+) -> float | None:
+    if not sorted_values:
+        return None
+    if percentile <= 0:
+        return sorted_values[0]
+    if percentile >= 100:
+        return sorted_values[-1]
+    rank = math.ceil((percentile / 100) * len(sorted_values))
+    index = min(len(sorted_values) - 1, max(0, rank - 1))
+    return sorted_values[index]
+
+
+def _round_chart_number(value: float, digits: int = 3) -> float:
+    return round(value, digits)
+
+
+async def _read_metric_events_from_stream(
+    *,
+    state_repo: TestStateRepository,
+    metric_id: str,
+    from_ts: int | None,
+    batch_size: int = 5000,
+) -> list[dict[str, Any]]:
+    if from_ts is None:
+        start = "-"
+    else:
+        start = f"{from_ts * 1000}-0"
+
+    events: list[dict[str, Any]] = []
+    last_event_id: str | None = None
+    while True:
+        if last_event_id is None:
+            chunk = await state_repo.read_metric_events(
+                metric_id=metric_id,
+                start=start,
+                end="+",
+                count=batch_size,
+            )
+        else:
+            chunk = await state_repo.read_metric_events_after(
+                metric_id=metric_id,
+                after_event_id=last_event_id,
+                count=batch_size,
+            )
+
+        if not chunk:
+            break
+
+        events.extend(chunk)
+        last_event_id = chunk[-1]["event_id"]
+        if len(chunk) < batch_size:
+            break
+
+    return events
+
+
+async def _read_users_timeline_events_from_stream(
+    *,
+    state_repo: TestStateRepository,
+    from_ts: int | None,
+    batch_size: int = 5000,
+) -> list[dict[str, Any]]:
+    if from_ts is None:
+        start = "-"
+    else:
+        start = f"{from_ts * 1000}-0"
+
+    events: list[dict[str, Any]] = []
+    last_event_id: str | None = None
+    while True:
+        if last_event_id is None:
+            chunk = await state_repo.read_users_timeline_events(
+                start=start,
+                end="+",
+                count=batch_size,
+            )
+        else:
+            chunk = await state_repo.read_users_timeline_events_after(
+                after_event_id=last_event_id,
+                count=batch_size,
+            )
+
+        if not chunk:
+            break
+
+        events.extend(chunk)
+        last_event_id = chunk[-1]["event_id"]
+        if len(chunk) < batch_size:
+            break
+
+    return events
+
+
+async def _build_metrics_history_response(
+    *,
+    state_repo: TestStateRepository,
+    now_ts: int,
+    from_ts: int | None,
+    range_id: str,
+) -> dict[str, object]:
+    metric_ids = await state_repo.list_metrics()
+    points: dict[int, dict[str, dict[str, Any]]] = {}
+    users_timeline_by_ts: dict[int, int] = {}
+
+    for metric_id in metric_ids:
+        events = await _read_metric_events_from_stream(
+            state_repo=state_repo,
+            metric_id=metric_id,
+            from_ts=from_ts,
+        )
+        for event in events:
+            event_id = str(event.get("event_id", ""))
+            ts = _parse_metric_event_second(event_id)
+            if ts is None:
+                continue
+
+            metric_data_by_id = points.setdefault(ts, {})
+            metric_data = metric_data_by_id.setdefault(
+                metric_id,
+                {
+                    "requests": 0,
+                    "latencies": [],
+                },
+            )
+            metric_data["requests"] = int(metric_data["requests"]) + 1
+            payload = event.get("data")
+            if not isinstance(payload, dict):
+                continue
+            latency = _extract_latency_value(payload)
+            if latency is None:
+                continue
+            metric_data["latencies"].append(latency)
+
+    users_timeline_events = await _read_users_timeline_events_from_stream(
+        state_repo=state_repo,
+        from_ts=from_ts,
+    )
+    for event in users_timeline_events:
+        event_id = str(event.get("event_id", ""))
+        ts = _parse_metric_event_second(event_id)
+        if ts is None:
+            continue
+        users_count = event.get("users_count")
+        if isinstance(users_count, int):
+            users_timeline_by_ts[ts] = max(0, users_count)
+
+    series: list[dict[str, object]] = []
+    all_timestamps = sorted(set(points.keys()) | set(users_timeline_by_ts.keys()))
+    for ts in all_timestamps:
+        metric_payload: dict[str, dict[str, object]] = {}
+        metric_data_by_id = points.get(ts, {})
+        for metric_id, metric_data in metric_data_by_id.items():
+            requests = int(metric_data["requests"])
+            latencies = sorted(float(value) for value in metric_data["latencies"])
+            avg = _round_chart_number(sum(latencies) / len(latencies)) if latencies else None
+            median = _sorted_median(latencies)
+            p95 = _sorted_percentile_nearest_rank(latencies, percentile=95)
+            p99 = _sorted_percentile_nearest_rank(latencies, percentile=99)
+            metric_payload[metric_id] = {
+                "rps": requests,
+                "latency_avg_ms": avg,
+                "latency_median_ms": _round_chart_number(median) if median is not None else None,
+                "latency_p95_ms": _round_chart_number(p95) if p95 is not None else None,
+                "latency_p99_ms": _round_chart_number(p99) if p99 is not None else None,
+            }
+        series.append(
+            {
+                "ts": ts,
+                "users": users_timeline_by_ts.get(ts),
+                "metrics": metric_payload,
+            }
+        )
+
+    return {
+        "generated_at": now_ts,
+        "range": range_id,
+        "from_ts": from_ts,
+        "count": len(series),
+        "points": series,
+    }

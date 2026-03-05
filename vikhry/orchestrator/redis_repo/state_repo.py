@@ -70,6 +70,10 @@ class TestStateRepository:
     def metric_stream_key(metric_id: str) -> str:
         return f"metric:{metric_id}"
 
+    @staticmethod
+    def users_timeline_stream_key() -> str:
+        return "users:timeline"
+
     async def initialize_defaults(self) -> None:
         await self._redis.setnx("test:state", TestState.IDLE.value)
         await self._redis.setnx("test:epoch", 0)
@@ -275,11 +279,31 @@ class TestStateRepository:
             return 0
         return int(await self._redis.delete(*keys_to_delete))
 
+    async def clear_users_timeline(self) -> int:
+        return int(await self._redis.delete(self.users_timeline_stream_key()))
+
     async def append_metric_event(self, metric_id: str, event: dict[str, Any]) -> str:
         await self.register_metric(metric_id)
         event_id = await self._redis.xadd(
             self.metric_stream_key(metric_id),
             {"data": orjson.dumps(event).decode("utf-8")},
+        )
+        return str(event_id)
+
+    async def append_users_timeline_event(
+        self,
+        *,
+        epoch: int,
+        users_count: int,
+        source: str,
+    ) -> str:
+        event_id = await self._redis.xadd(
+            self.users_timeline_stream_key(),
+            {
+                "epoch": str(epoch),
+                "users_count": str(max(0, users_count)),
+                "source": source,
+            },
         )
         return str(event_id)
 
@@ -317,6 +341,56 @@ class TestStateRepository:
             return await self.read_metric_events(metric_id=metric_id, count=count)
         items = await self.read_metric_events(
             metric_id=metric_id,
+            start=after_event_id,
+            end="+",
+            count=count + 1,
+        )
+        filtered = [item for item in items if item["event_id"] != after_event_id]
+        return filtered[:count]
+
+    async def read_users_timeline_events(
+        self,
+        start: str = "-",
+        end: str = "+",
+        count: int = 100,
+    ) -> list[dict[str, Any]]:
+        items = await self._redis.xrange(
+            self.users_timeline_stream_key(),
+            min=start,
+            max=end,
+            count=count,
+        )
+        parsed_items: list[dict[str, Any]] = []
+        for event_id, values in items:
+            raw_epoch = values.get("epoch")
+            raw_users_count = values.get("users_count")
+            raw_source = values.get("source")
+            try:
+                epoch = int(raw_epoch) if raw_epoch is not None else 0
+            except (TypeError, ValueError):
+                epoch = 0
+            try:
+                users_count = int(raw_users_count) if raw_users_count is not None else 0
+            except (TypeError, ValueError):
+                users_count = 0
+            parsed_items.append(
+                {
+                    "event_id": str(event_id),
+                    "epoch": epoch,
+                    "users_count": max(0, users_count),
+                    "source": str(raw_source) if raw_source is not None else "unknown",
+                }
+            )
+        return parsed_items
+
+    async def read_users_timeline_events_after(
+        self,
+        after_event_id: str | None,
+        count: int = 100,
+    ) -> list[dict[str, Any]]:
+        if after_event_id is None:
+            return await self.read_users_timeline_events(count=count)
+        items = await self.read_users_timeline_events(
             start=after_event_id,
             end="+",
             count=count + 1,

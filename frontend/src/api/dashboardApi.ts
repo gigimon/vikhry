@@ -1,5 +1,6 @@
 import type {
   ApiErrorPayload,
+  MetricsHistoryResponse,
   MetricsResponse,
   ReadyResponse,
   ResourcesResponse,
@@ -62,6 +63,17 @@ export async function fetchMetrics(options?: {
   return requestJson<MetricsResponse>(
     `/metrics?count=${count}&include_events=${includeEvents ? 'true' : 'false'}`,
   )
+}
+
+export async function fetchMetricsHistory(
+  range: '5m' | '15m' | '30m' | 'all',
+  options?: { fromTs?: number },
+): Promise<MetricsHistoryResponse> {
+  const params = new URLSearchParams({ range })
+  if (typeof options?.fromTs === 'number' && Number.isFinite(options.fromTs)) {
+    params.set('from_ts', String(Math.max(0, Math.floor(options.fromTs))))
+  }
+  return requestJson<MetricsHistoryResponse>(`/metrics/history?${params.toString()}`)
 }
 
 export async function fetchResources(): Promise<ResourcesResponse> {

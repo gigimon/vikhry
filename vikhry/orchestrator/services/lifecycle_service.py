@@ -107,6 +107,7 @@ class LifecycleService:
             if self._on_before_start_test is not None:
                 await self._on_before_start_test()
                 logger.info("start_test cleared previous metrics epoch=%s", epoch)
+            await self._state_repo.clear_users_timeline()
             prepare_result = await self._prepare_resources(target_users)
             start_result = await self._user_orchestration.send_start_test(
                 epoch,
@@ -120,6 +121,11 @@ class LifecycleService:
                 updated_at=self._now_ts(),
             )
             await self._state_repo.set_state(TestState.RUNNING)
+            await self._state_repo.append_users_timeline_event(
+                epoch=epoch,
+                users_count=target_users,
+                source="start_test",
+            )
             logger.info(
                 "start_test completed epoch=%s target_users=%s workers_started=%s users_added=%s",
                 epoch,
@@ -184,6 +190,11 @@ class LifecycleService:
             )
             add_result = await self._user_orchestration.add_users(user_ids, epoch)
             add_result["prepare_result"] = prepare_result
+            await self._state_repo.append_users_timeline_event(
+                epoch=epoch,
+                users_count=target_users,
+                source="change_users",
+            )
             return ChangeUsersResult(
                 epoch=epoch,
                 target_users=target_users,
@@ -197,6 +208,11 @@ class LifecycleService:
             count=current_users - target_users,
         )
         remove_result = await self._user_orchestration.remove_users(users_to_remove, epoch)
+        await self._state_repo.append_users_timeline_event(
+            epoch=epoch,
+            users_count=target_users,
+            source="change_users",
+        )
         return ChangeUsersResult(
             epoch=epoch,
             target_users=target_users,
@@ -228,6 +244,11 @@ class LifecycleService:
         epoch = await self._state_repo.get_epoch()
         stop_result = await self._user_orchestration.send_stop_test(epoch)
         await self._state_repo.clear_users_data()
+        await self._state_repo.append_users_timeline_event(
+            epoch=epoch,
+            users_count=0,
+            source="stop_test",
+        )
         await self._state_repo.set_state(TestState.IDLE)
         logger.info(
             "stop_test completed epoch=%s workers_stopped=%s state=%s",

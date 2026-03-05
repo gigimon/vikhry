@@ -19,6 +19,7 @@ Worker загружает VU-класс по import path `module.path:ClassName`
 - `--scenario` (по умолчанию: `vikhry.runtime.defaults:IdleVU`);
 - `--http-base-url` для относительных HTTP путей в сценарии;
 - `--vu-idle-sleep-s` для idle-паузы, когда нет eligible step.
+- `--vu-startup-jitter-ms` для случайной десинхронизации старта VU (по умолчанию `5ms`).
 
 ## Технологии
 

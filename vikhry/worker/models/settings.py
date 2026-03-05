@@ -14,3 +14,4 @@ class WorkerSettings:
     scenario: str = "vikhry.runtime.defaults:IdleVU"
     http_base_url: str = ""
     vu_idle_sleep_s: float = 0.05
+    vu_startup_jitter_ms: float = 5.0
