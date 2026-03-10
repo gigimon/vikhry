@@ -283,7 +283,7 @@
 - локальная команда `vikhry infra up` отвечает за подъем Redis в Docker и запуск orchestrator + N worker-процессов;
 - при отсутствии Docker CLI или недоступном daemon `infra` завершает запуск с явной ошибкой и cleanup уже поднятых процессов;
 - release automation делится на два workflow: Python artifacts/release и Docker image для UI;
-- публичная документация пока хранится как plain Markdown в `docs/`, генератор сайта будет выбран отдельно.
+- публичная документация первого релиза собирается как статический Starlight-сайт из каталога `docs/`.
 
 # First Release Implementation
 
@@ -306,7 +306,8 @@
 [x] Задокументировать release-процесс и необходимые GitHub secrets.
 
 ## Step 37: Public Documentation
-[x] Подготовить landing/quickstart/release markdown-страницы на основе текущих `README.md` и `docs/*.md`.
-[x] Вынести инструкции по `infra`, packaged UI и release artifacts.
+[x] Выбрать Starlight как documentation generator для первого релиза.
+[x] Поднять статический docs app в `docs/` с локальными командами `npm run dev` / `npm run build`.
+[x] Подготовить начальные разделы `Introduction`, `How to Run`, `Scenario`.
 [x] Перевести публичную документацию на английский.
-[ ] Выбрать и внедрить новый documentation generator/publishing flow.
+[ ] Добавить publishing flow для GitHub Pages.

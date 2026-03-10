@@ -2,34 +2,37 @@
 
 ## Цель
 
-Поддерживать публичную документацию первого релиза как отдельный слой поверх существующих markdown-материалов репозитория.
+Поддерживать публичную документацию первого релиза как отдельный статический сайт на Starlight.
 
 ## Принятые решения
 
-- Новые страницы:
-  - `docs/index.md` как landing;
-  - `docs/quickstart.md` под сценарий первого запуска через `vikhry infra up`;
-  - `docs/release.md` под packaged UI, release artifacts и CI flow.
-- Существующие технические документы (`0_cli.md`, `1_architecture.md`, `2_orchestrator.md`, `3_worker.md`, `4_test_structure.md`, `5_ui.md`, `contracts/v1.md`) поддерживаются как plain Markdown.
-- Конкретный documentation generator и publishing flow будут выбраны отдельно.
+- Generator: `@astrojs/starlight`.
+- Публичная документация живет внутри отдельного docs app в каталоге `docs/`.
+- Для первого docs-итерационного среза фиксируем только три раздела:
+  - `Introduction`
+  - `How to Run`
+  - `Scenario`
+- Для стабильной сборки используем зафиксированный dependency set, совместимый с официальным Starlight example tree.
+- Встроенный Starlight 404 route отключен, используется собственный `src/pages/404.astro`.
 
 ## Реализация
 
-[x] Создать `docs/index.md`, `docs/quickstart.md`, `docs/release.md`.
-[x] Перевести публичную документацию на английский.
-[x] Обновить README и docs под хранение documentation content в plain Markdown.
-[ ] Выбрать новый documentation generator.
-[ ] Добавить новый publishing flow после выбора генератора.
+[x] Создать Starlight app в `docs/` (`package.json`, `astro.config.mjs`, content config, public assets).
+[x] Подготовить страницы `src/content/docs/index.mdx`, `how-to-run.md`, `scenario.md`.
+[x] Описать install flow через PyPI и запуск через `vikhry infra up`.
+[x] Задокументировать сценарий, lifecycle hooks, step fields и resource model.
+[x] Добавить локальные команды docs build/dev в `README.md`.
+[ ] Добавить publishing flow для GitHub Pages.
 
 ## Прогресс
 
-- [x] Добавлены landing, quickstart и release страницы.
-- [x] Публичная документация переведена на английский.
-- [x] Previous documentation-site tooling was removed from the repository.
-- [ ] Новый generator/publishing flow еще не выбран.
+- [x] Starlight выбран и внедрен.
+- [x] Начальные разделы `Introduction`, `How to Run`, `Scenario` готовы.
+- [x] `npm run build` и `npm run check` проходят.
+- [ ] Публикация на GitHub Pages еще не добавлена.
 
 ## Риски и проверки
 
-- Важно не дублировать уже существующие docs-файлы без необходимости.
-- Quickstart должен отражать новый релизный путь через `infra up`, а не старый ручной bootstrap.
-- Стоит сохранить простую структуру документации, пока не выбран новый сайт-генератор.
+- Нужно держать docs content минимальным и не расползаться обратно в дублирование с `README.md`.
+- `How to Run` должен оставаться синхронным с фактическими CLI флагами.
+- При обновлении зависимостей Starlight важно не терять совместимый lock tree: плавающие патч-версии уже ломали `astro build`.

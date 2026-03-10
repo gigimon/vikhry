@@ -166,3 +166,22 @@ Release automation:
   Builds and publishes the runtime Docker image to `ghcr.io/<owner>/<repo>` on every branch push.
 
 The package version is taken from `project.version` in `pyproject.toml`.
+
+## Documentation site
+
+The public documentation site is built with Starlight from the files under [docs](/Users/gigimon/workspaces/home/vikhry/docs).
+
+Run it locally:
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+Build static output:
+
+```bash
+cd docs
+npm run build
+```
