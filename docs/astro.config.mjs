@@ -18,4 +18,9 @@ export default defineConfig({
 			disable404Route: true,
 		}),
 	],
+	vite: {
+		ssr: {
+      		noExternal: ["zod"],
+    	},
+  	},
 });
