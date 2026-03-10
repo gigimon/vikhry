@@ -21,6 +21,9 @@ dependencies = [
 [project.scripts]
 vikhry = "vikhry.cli:main"
 
+[project.urls]
+repository = "https://github.com/gigimon/vikhry"
+
 [tool.uv]
 package = true
 
