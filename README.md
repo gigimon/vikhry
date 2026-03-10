@@ -166,13 +166,3 @@ Release automation:
   Builds and publishes the runtime Docker image to `ghcr.io/<owner>/<repo>` on every branch push.
 
 The package version is taken from `project.version` in `pyproject.toml`.
-
-## Documentation
-
-Public documentation currently lives as plain Markdown files in [docs](/Users/gigimon/workspaces/home/vikhry/docs).
-
-Key entry points:
-- [docs/index.md](/Users/gigimon/workspaces/home/vikhry/docs/index.md)
-- [docs/quickstart.md](/Users/gigimon/workspaces/home/vikhry/docs/quickstart.md)
-- [docs/1_architecture.md](/Users/gigimon/workspaces/home/vikhry/docs/1_architecture.md)
-- [docs/4_test_structure.md](/Users/gigimon/workspaces/home/vikhry/docs/4_test_structure.md)

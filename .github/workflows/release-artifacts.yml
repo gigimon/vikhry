@@ -60,3 +60,4 @@ jobs:
         with:
           user: __token__
           password: ${{ secrets.PYPI_TOKEN }}
+          repository-url: https://github.com/gigimon/vikhry
