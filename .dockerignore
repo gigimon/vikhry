@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+dist
+dist-check
+site
+frontend/node_modules
+frontend/dist

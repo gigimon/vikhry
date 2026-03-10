@@ -1,33 +1,63 @@
 # UI
 
-## Библиотеки
+## Stack
 
-- React - без бэкенд фреймворков, только frontend
-- MobX - для управления состоянием приложения
-- React Router - для маршрутизации в приложении
-- react-query - для управления асинхронными запросами и состоянием данных
-- Recharts - для графиков и визуализации данных
+The UI is built with:
+- React
+- TypeScript
+- Vite
+- Recharts
 
-## Внешний вид страницы
+The frontend is bundled into the Python package and served by the orchestrator.
 
-- Хэдер - количество юзеров, воркеров, статус тестов, кнопки Start/Stop
-- Остальной вид страницы занимает окно с табами: статистика, графики, ошибки, ресурсы, воркеры
+## Main layout
 
-## Статистика
-Таблица, показывающая текущие метрики. Они должны быть разбиты по полю name. 
-Также в этой таблице надо показывать по каждой метрике данные: количество запросов/зафейленых, данные по latency (95 персентиль, 99 персентиль,  медиану, среднее), количество запросов в секунду
-Еще, должна быть возможность выбора, какие поля показывать в таблице (у метрик могут быть разные поля)
+The UI is organized around:
+- a header with overall state and controls;
+- tabs for metrics, charts, errors, resources, and workers.
 
-## Графики
-Графики должны показывать динамику изменения метрик во времени. Должна быть возможность выбрать, какие метрики отображать на графике. Также должна быть возможность выбрать временной интервал для отображения данных на графике (например, последние 5 минут, 15 минут, 30 минут, 1 час и т.д.)
+## Statistics
 
-## Ресурсы
+The statistics view shows metric tables grouped by metric name.
 
-Отображать доступные ресурсы по имени и количество созданных ресурсов, а также кнопки для создания еще ресурсов. При нажатии на кнопку создания ресурса, должно открываться модальное окно, в котором можно выбрать количество ресурсов для создания и подтвердить действие.
+It includes:
+- total requests;
+- errors;
+- error rate;
+- average latency;
+- median latency;
+- p95 latency;
+- p99 latency;
+- requests per second.
 
-## Воркеры
-Отображать список воркеров с их статусами (активный, неактивный, ошибка и т.д.), количество юзеров на каждом воркере.
+## Charts
 
-## Ошибки
-Отдельный таб с полным списком error events и traceback.
-Должен быть dropdown-фильтр по `result_category`, чтобы быстро переключать категории ошибок.
+The charts view shows metric history over time.
+
+It supports:
+- metric selection;
+- latency series selection;
+- multiple time ranges;
+- user-count overlays.
+
+## Resources
+
+The resources view shows:
+- resource names;
+- current resource counts;
+- resource creation actions.
+
+## Workers
+
+The workers view shows:
+- worker ID;
+- health status;
+- heartbeat age;
+- assigned user count.
+
+## Errors
+
+The errors view shows:
+- error events;
+- traceback details;
+- filtering by result category.

@@ -1,78 +1,178 @@
 # vikhry
 
-Асинхронный распределенный фреймворк для нагрузочного тестирования.
+`vikhry` is an async distributed load-testing framework built for high concurrency, horizontal scaling, and workloads that need globally unique resources.
 
-## Текущий статус
+It combines:
+- a Python runtime for writing virtual-user scenarios;
+- an orchestrator that manages test lifecycle and aggregates metrics;
+- worker processes that execute VUs;
+- Redis as the shared coordination layer;
+- a built-in web UI served by the orchestrator.
 
-Реализован v1 orchestrator и worker runtime.
+## Architecture
 
-Что уже работает:
-- lifecycle теста `IDLE -> PREPARING -> RUNNING -> STOPPING -> IDLE`;
-- управление пользователями через `start/change-users/stop`;
-- персональные команды worker через Redis Pub/Sub;
-- worker heartbeat (`worker:{worker_id}:status`);
-- исполнение `VU`-сценариев в worker (`@step`, weighted выбор, `requires`, `every_s`, `timeout`);
-- HTTP вызовы в VU через `pyreqwest`;
-- публикация событий нагрузки из worker в `metric:{metric_id}` streams;
-- CLI для orchestrator, worker и test-команд;
-- E2E smoke с проверкой согласованности Redis keyspace.
+At a high level, `vikhry` has four runtime parts:
 
-Что пока не реализовано:
-- provisioning pipeline для автоматического наполнения ресурсов через `@resource`-фабрики;
-- расширенная агрегация latency (p95/p99) на стороне orchestrator.
+1. `orchestrator`
+   Handles the test state machine, exposes HTTP/WebSocket APIs, serves the UI, and coordinates workers.
+2. `worker`
+   Runs VU tasks, processes orchestrator commands, publishes metrics, and manages acquired resources.
+3. `redis`
+   Stores shared state, worker presence, user assignments, resources, and metric streams.
+4. `ui`
+   A React frontend bundled into the Python package and served by the orchestrator.
 
-## CLI
+Lifecycle flow:
 
-Основные команды:
+`IDLE -> PREPARING -> RUNNING -> STOPPING -> IDLE`
 
-```bash
-uv run vikhry orchestrator start --host 127.0.0.1 --port 8080 --redis-url redis://127.0.0.1:6379/0
-uv run vikhry orchestrator start --scenario my_load.scenarios:MyVU
-uv run vikhry worker start --redis-url redis://127.0.0.1:6379/0
-uv run vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://api.example.com
-uv run vikhry test start --users 100 --orchestrator-url http://127.0.0.1:8080
-uv run vikhry test start --users 100 --init-param tenant=demo --init-param warmup=3
-uv run vikhry test change-users --users 150 --orchestrator-url http://127.0.0.1:8080
-uv run vikhry test stop --orchestrator-url http://127.0.0.1:8080
-uv run vikhry worker stop
-uv run vikhry orchestrator stop
-```
+## Install and run
 
-По умолчанию `orchestrator start` и `worker start` запускают процесс в фоне (detach) и освобождают терминал.
-Для запуска в текущем терминале используйте `--foreground`.
-Опция `orchestrator --scenario module.path:ClassName` использует тот же формат, что и worker.
-Orchestrator извлекает ресурсы и `on_init`-параметры из этого импортируемого сценария.
-В фазе `PREPARING` orchestrator создает недостающие ресурсы под `target_users` (on-demand).
-По умолчанию `pid` и `log` сохраняются в системный runtime-каталог:
-- macOS: `~/Library/Caches/vikhry/`
-- Linux: `$XDG_RUNTIME_DIR/vikhry/` (или `/run/user/<uid>/vikhry/`, fallback `/tmp/vikhry/`)
-
-## Зафиксированные решения worker MVP
-
-- Команды обрабатываются строго последовательно (single-threaded command dispatcher).
-- Переключение `epoch` у worker происходит только по `start_test`.
-- Для согласованности orchestrator отправляет `start_test` перед серией `add_user`.
-- `start_test` переводит worker в `RUNNING`, а `add_user` создает отдельную async VU-задачу.
-- Для десинхронизации старта VU используется startup jitter (default `5ms`, override: `--vu-startup-jitter-ms`).
-- Worker публикует step-события в `metric:worker:{worker_id}` для live-агрегации.
-- `worker_id` по умолчанию генерируется автоматически (`uuid4().hex[:8]`), можно передать через `--worker-id`.
-- В логах worker есть события: startup, подключение к Redis, получение command envelope.
-
-## Тесты
-
-Unit + integration:
+Install from PyPI:
 
 ```bash
-uv run pytest -q
+pip install vikhry
 ```
 
-Только integration (нужен Docker):
+Start local infrastructure:
 
 ```bash
-uv run pytest -m integration tests/integration -q
+vikhry infra up --worker-count 3 --scenario my_scenario:DemoVU
 ```
 
-UI может получить параметры `VU.on_init` через `GET /scenario/on_init_params`,
-а затем передать их в `POST /start_test` как `init_params`.
+This command:
+- checks that Docker is available;
+- starts Redis in a Docker container;
+- starts the orchestrator;
+- starts the requested number of workers.
 
-На текущем состоянии: `45 passed` (`uv run pytest -q`).
+Open:
+- UI: `http://127.0.0.1:8080/`
+- API: `http://127.0.0.1:8080`
+
+Stop everything:
+
+```bash
+vikhry infra down
+```
+
+## Example test file
+
+Create `my_scenario.py`:
+
+```python
+from __future__ import annotations
+
+from typing import Any
+
+from vikhry import ReqwestClient, VU, between, resource, step
+
+
+@resource(name="users")
+async def create_user(resource_id: int | str, _ctx: object) -> dict[str, Any]:
+    rid = str(resource_id)
+    return {
+        "resource_id": rid,
+        "username": f"user_{rid}",
+        "password": "password",
+    }
+
+
+class DemoVU(VU):
+    http = ReqwestClient(timeout=5.0)
+
+    async def on_init(self, base_url: str) -> None:
+        self.http = self.http(base_url=base_url)
+
+    async def on_start(self) -> None:
+        self.user = await self.resources.acquire("users")
+
+    async def on_stop(self) -> None:
+        await self.resources.release("users", str(self.user["resource_id"]))
+
+    @step(name="login", weight=1.0, every_s=between(10.0, 15.0), timeout=5.0)
+    async def login(self) -> None:
+        response = await self.http.post(
+            "/auth",
+            json={
+                "username": self.user["username"],
+                "password": self.user["password"],
+            },
+        )
+        if response.status >= 400:
+            raise RuntimeError(f"login returned HTTP {response.status}")
+
+    @step(name="catalog", weight=3.0, requires=("login",), every_s=between(0.2, 1.0))
+    async def catalog(self) -> None:
+        response = await self.http.get("/catalog")
+        if response.status >= 400:
+            raise RuntimeError(f"catalog returned HTTP {response.status}")
+```
+
+Run it:
+
+```bash
+vikhry infra up --worker-count 3 --scenario my_scenario:DemoVU
+```
+
+## Test authoring capabilities
+
+`vikhry` scenarios are plain Python classes built on top of the VU DSL.
+
+What you can define:
+- `VU.on_init(...)`
+  Accept runtime parameters for each VU instance.
+- `VU.on_start()` / `VU.on_stop()`
+  Allocate and release state or resources around the VU lifecycle.
+- `@step(...)`
+  Define executable load steps.
+- `@resource(name="...")`
+  Define global resource factories managed through Redis-backed pools.
+- `ReqwestClient`
+  Use an async HTTP client for relative or absolute requests.
+- `emit_metric(...)` and `@metric(...)`
+  Publish custom metrics in addition to automatic HTTP and step metrics.
+
+Step controls:
+- `weight`
+  Weighted random scheduling between eligible steps.
+- `requires`
+  Declare prerequisites by step name.
+- `every_s`
+  Throttle step execution to a fixed or randomized interval.
+- `timeout`
+  Fail a step if it exceeds its maximum runtime.
+
+Resource model:
+- resource factories create globally tracked objects;
+- workers acquire resources with `self.resources.acquire(name)`;
+- workers release them with `self.resources.release(name, resource_id)`.
+
+## Packaging and release
+
+The Python package includes the built UI assets.
+
+Build locally:
+
+```bash
+./scripts/build_frontend.sh
+uv build
+```
+
+Release automation:
+- `.github/workflows/release-artifacts.yml`
+  Builds the frontend, creates `wheel` and `sdist`, and publishes the package to PyPI using `PYPI_TOKEN`.
+- `.github/workflows/docker-image.yml`
+  Builds and publishes the runtime Docker image to `ghcr.io/<owner>/<repo>` on every branch push.
+
+The package version is taken from `project.version` in `pyproject.toml`.
+
+## Documentation
+
+Public documentation currently lives as plain Markdown files in [docs](/Users/gigimon/workspaces/home/vikhry/docs).
+
+Key entry points:
+- [docs/index.md](/Users/gigimon/workspaces/home/vikhry/docs/index.md)
+- [docs/quickstart.md](/Users/gigimon/workspaces/home/vikhry/docs/quickstart.md)
+- [docs/1_architecture.md](/Users/gigimon/workspaces/home/vikhry/docs/1_architecture.md)
+- [docs/4_test_structure.md](/Users/gigimon/workspaces/home/vikhry/docs/4_test_structure.md)

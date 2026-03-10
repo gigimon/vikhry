@@ -1,41 +1,44 @@
-# Алгоритм работы оркестратора
+# Orchestrator
 
-## Технологии
+## Technology stack
 
-Используется асинхронная модель исполнения, в основе лежит uvloop для event loop и robyn для web части.  
-Взаимодействие с Redis через `redis.asyncio`. Для JSON-команд используется `orjson`.
+The orchestrator uses:
+- `asyncio` with `uvloop`;
+- `robyn` for HTTP and WebSocket APIs;
+- `redis.asyncio` for shared coordination;
+- `orjson` for command and payload serialization.
 
-## Ограничения v1
+## Responsibilities
 
-1. Конфигурационный файл не используется, все параметры задаются через CLI.
-2. Один сквозной run без `run_id`.
-3. Один активный тест одновременно.
-4. Нет `lifecycle lock` между несколькими orchestrator-инстансами.
-5. Нет command acknowledgements (`ack/nack`).
-6. Команды отправляются только в персональные каналы worker'ов (`worker:{worker_id}:commands`), без broadcast.
+The orchestrator is responsible for:
+- initializing runtime state in Redis;
+- tracking alive workers from heartbeats;
+- executing the test state machine;
+- creating and counting resources;
+- distributing users across workers;
+- aggregating metrics for CLI and UI;
+- serving the bundled web UI.
 
-## Функциональность
+## v1 rules
 
-- Инициализация: подключение к Redis, подготовка служебных ключей (`test:state`, `test:epoch`).
-- Мониторинг worker'ов: периодическая проверка `worker:{worker_id}:status`.
-- Управление тестом: `start_test`, `stop_test`, `change_users`.
-- Распределение пользователей: round-robin по alive worker'ам.
-- Работа с ресурсами: создание и учет ресурсов без автоматической очистки между запусками.
-- Передача метрик в webui: чтение метрик из Redis и отдача через HTTP/WebSocket API.
+1. Runtime configuration comes only from CLI flags.
+2. Only one test can run at a time.
+3. There is no orchestrator locking across multiple orchestrator instances.
+4. Command acknowledgements are not implemented.
+5. Commands are sent only to per-worker channels.
 
-## Состояния теста
+## State machine
 
-Оркестратор работает по state machine:
-`IDLE -> PREPARING -> RUNNING -> STOPPING -> IDLE`.
+The orchestrator manages:
 
-Правила:
-1. `start_test` разрешен только из `IDLE`.
-2. `change_users` разрешен только в `RUNNING`.
-3. `stop_test` разрешен в `PREPARING` и `RUNNING`.
+`IDLE -> PREPARING -> RUNNING -> STOPPING -> IDLE`
 
-## Формат команд worker'ам
+Allowed transitions:
+- `start_test` only from `IDLE`
+- `change_users` only from `RUNNING`
+- `stop_test` from `PREPARING` or `RUNNING`
 
-Команды сериализуются в JSON:
+## Worker command format
 
 ```json
 {
@@ -49,49 +52,56 @@
 }
 ```
 
-Поддерживаемые команды:
-1. `start_test`
-2. `stop_test`
-3. `add_user`
-4. `remove_user`
+Supported command types:
+- `start_test`
+- `stop_test`
+- `add_user`
+- `remove_user`
 
-## Краткий алгоритм работы
+## Runtime behavior
 
-1. При запуске orchestrator подключается к Redis и поднимает API на Robyn.
-2. При `start_test`:
-   - проверяет `test:state`; если не `IDLE`, возвращает ошибку;
-   - ставит `test:state=PREPARING`, увеличивает `test:epoch`;
-   - создает/дополняет ресурсы;
-   - отправляет `start_test` каждому alive worker;
-   - распределяет пользователей по worker'ам round-robin и отправляет серию `add_user`;
-   - ставит `test:state=RUNNING`.
-3. При `change_users`:
-   - вычисляет дельту;
-   - при увеличении шлет серию `add_user` с конкретными `user_id`;
-   - при уменьшении шлет серию `remove_user`.
-4. При `stop_test`:
-   - ставит `test:state=STOPPING`;
-   - отправляет `stop_test` каждому alive worker;
-   - очищает пользовательские ключи;
-   - не очищает ресурсы;
-   - ставит `test:state=IDLE`.
+### `start_test`
 
-### Примечание по согласованности с worker MVP
+1. Validate that the current state is `IDLE`.
+2. Set `test:state=PREPARING`.
+3. Increment `test:epoch`.
+4. Prepare or extend resources.
+5. Send `start_test` to each alive worker.
+6. Allocate users with round-robin.
+7. Send `add_user` commands.
+8. Set `test:state=RUNNING`.
 
-Worker в MVP переключает `epoch` только на `start_test`, поэтому orchestrator в `start_test`
-сначала отправляет `start_test`, и только затем `add_user`.
+### `change_users`
 
-## API эндпоинты (v1)
+1. Compute the delta against the current user count.
+2. Send `add_user` when scaling up.
+3. Send `remove_user` when scaling down.
 
-- `/create_resource` - создать ресурс(ы)
-- `/start_test` - запуск теста с N users
-- `/stop_test` - остановка теста
-- `/change_users` - изменение целевого числа пользователей
-- `/metrics` - получение метрик
-- `/scenario/on_init_params` - параметры `on_init` из scenario-файла для UI
+### `stop_test`
 
-### `start_test` payload
+1. Set `test:state=STOPPING`.
+2. Send `stop_test` to alive workers.
+3. Clear user-related Redis keys.
+4. Keep resources intact.
+5. Set `test:state=IDLE`.
 
-`/start_test` принимает:
-- `target_users` (обязательный)
-- `init_params` (опциональный объект параметров для `VU.on_init`)
+## API surface
+
+v1 endpoints:
+- `GET /health`
+- `GET /ready`
+- `POST /start_test`
+- `POST /change_users`
+- `POST /stop_test`
+- `POST /create_resource`
+- `POST /ensure_resource`
+- `GET /metrics`
+- `GET /workers`
+- `GET /resources`
+- `GET /scenario/on_init_params`
+- `GET /metrics/history`
+- `GET /ws/metrics`
+
+`/start_test` accepts:
+- `target_users`
+- `init_params` as an optional object for `VU.on_init`

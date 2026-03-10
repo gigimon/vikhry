@@ -3,11 +3,13 @@ import logging
 import math
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import orjson
 from pydantic import ValidationError
 from robyn import Request, Response, Robyn
+from robyn.responses import serve_file, serve_html
 from robyn.ws import WebSocketDisconnect
 
 from vikhry.orchestrator.models.api import ChangeUsersRequest, StartTestRequest
@@ -54,6 +56,7 @@ def register_routes(
     resource_service: ResourceService,
     metrics_service: MetricsService,
     scenario_on_init_spec: dict[str, object],
+    ui_assets_dir: Path | None,
 ) -> None:
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -232,6 +235,38 @@ def register_routes(
             return None
         finally:
             await metrics_service.unsubscribe(subscriber_id)
+
+    if ui_assets_dir is not None:
+        _register_ui_routes(app=app, ui_assets_dir=ui_assets_dir)
+
+
+def _register_ui_routes(app: Robyn, ui_assets_dir: Path) -> None:
+    index_file = ui_assets_dir / "index.html"
+    if not index_file.is_file():
+        logger.warning("UI assets directory %s has no index.html; skipping UI routes", ui_assets_dir)
+        return
+
+    @app.get("/")
+    async def ui_index() -> Response:
+        return serve_html(str(index_file))
+
+    for child in sorted(ui_assets_dir.iterdir(), key=lambda entry: entry.name):
+        if child.name == "index.html":
+            continue
+
+        route = f"/{child.name}"
+        if child.is_dir():
+            app.serve_directory(route, str(child))
+            continue
+
+        app.get(route)(_static_file_handler(child))
+
+
+def _static_file_handler(file_path: Path):
+    async def handler() -> Response:
+        return serve_file(str(file_path))
+
+    return handler
 
 
 async def _build_workers_response(

@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 from uuid import uuid4
 
 import orjson
+import redis
 import typer
 from pyreqwest.client import SyncClientBuilder
 from pyreqwest.exceptions import PyreqwestError
@@ -28,9 +30,11 @@ app = typer.Typer(
 orchestrator_app = typer.Typer(no_args_is_help=True)
 test_app = typer.Typer(no_args_is_help=True)
 worker_app = typer.Typer(no_args_is_help=True)
+infra_app = typer.Typer(no_args_is_help=True)
 app.add_typer(orchestrator_app, name="orchestrator")
 app.add_typer(test_app, name="test")
 app.add_typer(worker_app, name="worker")
+app.add_typer(infra_app, name="infra")
 
 DEFAULT_ORCHESTRATOR_URL = "http://127.0.0.1:8080"
 
@@ -61,6 +65,12 @@ DEFAULT_PID_FILE = DEFAULT_RUNTIME_DIR / "orchestrator.pid"
 DEFAULT_LOG_FILE = DEFAULT_RUNTIME_DIR / "orchestrator.log"
 DEFAULT_WORKER_PID_FILE = DEFAULT_RUNTIME_DIR / "worker.pid"
 DEFAULT_WORKER_LOG_FILE = DEFAULT_RUNTIME_DIR / "worker.log"
+DEFAULT_INFRA_DIR = DEFAULT_RUNTIME_DIR / "infra"
+DEFAULT_INFRA_ORCHESTRATOR_PID_FILE = DEFAULT_INFRA_DIR / "orchestrator.pid"
+DEFAULT_INFRA_ORCHESTRATOR_LOG_FILE = DEFAULT_INFRA_DIR / "orchestrator.log"
+DEFAULT_INFRA_REDIS_CONTAINER_NAME = "vikhry-redis-infra"
+DEFAULT_INFRA_REDIS_IMAGE = "redis:7-alpine"
+DEFAULT_INFRA_REDIS_URL = "redis://127.0.0.1:6379/0"
 
 
 @orchestrator_app.command("start")
@@ -424,6 +434,110 @@ def worker_stop(
     )
 
 
+@infra_app.command("up")
+def infra_up(
+    worker_count: Annotated[int, typer.Option("--worker-count", min=1)],
+    scenario: Annotated[
+        str,
+        typer.Option(
+            "--scenario",
+            help="Scenario import path in `module.path:ClassName` format.",
+        ),
+    ],
+) -> None:
+    DEFAULT_INFRA_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_no_active_orchestrator_or_exit(DEFAULT_INFRA_ORCHESTRATOR_PID_FILE)
+    _ensure_no_active_infra_workers_or_exit(DEFAULT_INFRA_DIR)
+    _ensure_docker_available_or_exit()
+    _ensure_infra_redis_container_available_for_up_or_exit(DEFAULT_INFRA_REDIS_CONTAINER_NAME)
+
+    started_worker_pid_files: list[Path] = []
+    redis_started = False
+    orchestrator_started = False
+
+    try:
+        _start_infra_redis_or_exit(DEFAULT_INFRA_REDIS_CONTAINER_NAME)
+        redis_started = True
+        _wait_for_redis_ready_or_exit(DEFAULT_INFRA_REDIS_URL, timeout_s=15.0)
+
+        orchestrator_settings = OrchestratorSettings(
+            redis_url=DEFAULT_INFRA_REDIS_URL,
+            scenario=scenario,
+        )
+        _start_orchestrator_detached(
+            settings=orchestrator_settings,
+            pid_file=DEFAULT_INFRA_ORCHESTRATOR_PID_FILE,
+            log_file=DEFAULT_INFRA_ORCHESTRATOR_LOG_FILE,
+            startup_timeout_s=10.0,
+        )
+        orchestrator_started = True
+
+        for index in range(1, worker_count + 1):
+            worker_settings = WorkerSettings(
+                redis_url=DEFAULT_INFRA_REDIS_URL,
+                worker_id=f"infra-worker-{index}",
+                scenario=scenario,
+            )
+            pid_file = _infra_worker_pid_file(index)
+            log_file = _infra_worker_log_file(index)
+            _start_worker_detached(
+                settings=worker_settings,
+                pid_file=pid_file,
+                log_file=log_file,
+                startup_timeout_s=10.0,
+            )
+            started_worker_pid_files.append(pid_file)
+    except typer.Exit:
+        _cleanup_infra_runtime(
+            worker_pid_files=started_worker_pid_files,
+            orchestrator_pid_file=DEFAULT_INFRA_ORCHESTRATOR_PID_FILE if orchestrator_started else None,
+            redis_container_name=DEFAULT_INFRA_REDIS_CONTAINER_NAME if redis_started else None,
+        )
+        raise
+
+    typer.echo(
+        "Infra started.\n"
+        f"UI: {DEFAULT_ORCHESTRATOR_URL}/\n"
+        f"API: {DEFAULT_ORCHESTRATOR_URL}\n"
+        f"Redis container: {DEFAULT_INFRA_REDIS_CONTAINER_NAME}\n"
+        f"Workers: {worker_count}\n"
+        f"Runtime dir: {DEFAULT_INFRA_DIR}"
+    )
+
+
+@infra_app.command("down")
+def infra_down() -> None:
+    worker_pid_files = sorted(DEFAULT_INFRA_DIR.glob("worker-*.pid"))
+    stopped_workers = 0
+    stop_failures: list[str] = []
+
+    for pid_file in worker_pid_files:
+        if _stop_process_from_pid_file(pid_file, process_label=pid_file.stem):
+            stopped_workers += 1
+        elif pid_file.exists():
+            stop_failures.append(f"failed to stop `{pid_file}`")
+
+    orchestrator_stopped = _stop_process_from_pid_file(
+        DEFAULT_INFRA_ORCHESTRATOR_PID_FILE,
+        process_label="infra orchestrator",
+    )
+    redis_removed = _remove_infra_redis_container(DEFAULT_INFRA_REDIS_CONTAINER_NAME)
+
+    if stop_failures:
+        raise typer.Exit(code=_error("; ".join(stop_failures)))
+
+    if not worker_pid_files and not orchestrator_stopped and not redis_removed:
+        typer.echo("Infra is not running.")
+        return
+
+    typer.echo(
+        "Infra stopped.\n"
+        f"Workers stopped: {stopped_workers}\n"
+        f"Orchestrator stopped: {'yes' if orchestrator_stopped else 'no'}\n"
+        f"Redis container removed: {'yes' if redis_removed else 'no'}"
+    )
+
+
 @test_app.command("start")
 def test_start(
     users: Annotated[int, typer.Option("--users", "-u", min=0)],
@@ -526,12 +640,26 @@ def _start_orchestrator_detached_or_exit(
     log_file: Path,
     startup_timeout_s: float,
 ) -> None:
-    _ensure_pid_file_writable_or_exit(pid_file)
-    _ensure_no_active_orchestrator_or_exit(pid_file)
+    pid = _start_orchestrator_detached(
+        settings=settings,
+        pid_file=pid_file,
+        log_file=log_file,
+        startup_timeout_s=startup_timeout_s,
+    )
+    typer.echo(
+        f"Orchestrator started in background (pid={pid}). "
+        f"Logs: {log_file}, pid file: {pid_file}"
+    )
+    raise typer.Exit(code=0)
 
-    log_parent = log_file.parent if log_file.parent != Path("") else Path(".")
-    log_parent.mkdir(parents=True, exist_ok=True)
 
+def _start_orchestrator_detached(
+    *,
+    settings: OrchestratorSettings,
+    pid_file: Path,
+    log_file: Path,
+    startup_timeout_s: float,
+) -> int:
     command = [
         sys.executable,
         "-m",
@@ -564,48 +692,13 @@ def _start_orchestrator_detached_or_exit(
     if settings.scenario:
         command.extend(["--scenario", settings.scenario])
 
-    try:
-        with log_file.open("ab") as log_handle:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-                close_fds=True,
-            )
-    except OSError as exc:
-        raise typer.Exit(code=_error(f"Failed to spawn orchestrator process: {exc}")) from exc
-
-    deadline = time.time() + startup_timeout_s
-    while time.time() < deadline:
-        pid = _read_pid(pid_file)
-        if pid is not None and _is_process_alive(pid):
-            typer.echo(
-                f"Orchestrator started in background (pid={pid}). "
-                f"Logs: {log_file}, pid file: {pid_file}"
-            )
-            raise typer.Exit(code=0)
-        if process.poll() is not None:
-            break
-        time.sleep(0.1)
-
-    if process.poll() is None:
-        _send_stop_signal_and_wait(process.pid, signal.SIGINT, 1.0)
-    if process.poll() is None:
-        _send_stop_signal_and_wait(process.pid, signal.SIGTERM, 1.0)
-    if process.poll() is None:
-        try:
-            os.kill(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-    tail = _tail_file(log_file, max_lines=20)
-    tail_suffix = f"\nRecent logs:\n{tail}" if tail else ""
-    raise typer.Exit(
-        code=_error(
-            f"Orchestrator failed to start within {startup_timeout_s:.1f}s.{tail_suffix}"
-        )
+    return _start_detached_process_or_exit(
+        command=command,
+        pid_file=pid_file,
+        log_file=log_file,
+        startup_timeout_s=startup_timeout_s,
+        ensure_not_running=_ensure_no_active_orchestrator_or_exit,
+        process_label="Orchestrator",
     )
 
 
@@ -616,12 +709,26 @@ def _start_worker_detached_or_exit(
     log_file: Path,
     startup_timeout_s: float,
 ) -> None:
-    _ensure_pid_file_writable_or_exit(pid_file)
-    _ensure_no_active_worker_or_exit(pid_file)
+    pid = _start_worker_detached(
+        settings=settings,
+        pid_file=pid_file,
+        log_file=log_file,
+        startup_timeout_s=startup_timeout_s,
+    )
+    typer.echo(
+        f"Worker started in background (worker_id={settings.worker_id}, pid={pid}). "
+        f"Logs: {log_file}, pid file: {pid_file}"
+    )
+    raise typer.Exit(code=0)
 
-    log_parent = log_file.parent if log_file.parent != Path("") else Path(".")
-    log_parent.mkdir(parents=True, exist_ok=True)
 
+def _start_worker_detached(
+    *,
+    settings: WorkerSettings,
+    pid_file: Path,
+    log_file: Path,
+    startup_timeout_s: float,
+) -> int:
     command = [
         sys.executable,
         "-m",
@@ -652,6 +759,31 @@ def _start_worker_detached_or_exit(
         str(pid_file),
     ]
 
+    return _start_detached_process_or_exit(
+        command=command,
+        pid_file=pid_file,
+        log_file=log_file,
+        startup_timeout_s=startup_timeout_s,
+        ensure_not_running=_ensure_no_active_worker_or_exit,
+        process_label="Worker",
+    )
+
+
+def _start_detached_process_or_exit(
+    *,
+    command: list[str],
+    pid_file: Path,
+    log_file: Path,
+    startup_timeout_s: float,
+    ensure_not_running: Callable[[Path], None],
+    process_label: str,
+) -> int:
+    _ensure_pid_file_writable_or_exit(pid_file)
+    ensure_not_running(pid_file)
+
+    log_parent = log_file.parent if log_file.parent != Path("") else Path(".")
+    log_parent.mkdir(parents=True, exist_ok=True)
+
     try:
         with log_file.open("ab") as log_handle:
             process = subprocess.Popen(
@@ -663,17 +795,15 @@ def _start_worker_detached_or_exit(
                 close_fds=True,
             )
     except OSError as exc:
-        raise typer.Exit(code=_error(f"Failed to spawn worker process: {exc}")) from exc
+        raise typer.Exit(
+            code=_error(f"Failed to spawn {process_label.lower()} process: {exc}")
+        ) from exc
 
     deadline = time.time() + startup_timeout_s
     while time.time() < deadline:
         pid = _read_pid(pid_file)
         if pid is not None and _is_process_alive(pid):
-            typer.echo(
-                f"Worker started in background (worker_id={settings.worker_id}, pid={pid}). "
-                f"Logs: {log_file}, pid file: {pid_file}"
-            )
-            raise typer.Exit(code=0)
+            return pid
         if process.poll() is not None:
             break
         time.sleep(0.1)
@@ -691,8 +821,237 @@ def _start_worker_detached_or_exit(
     tail = _tail_file(log_file, max_lines=20)
     tail_suffix = f"\nRecent logs:\n{tail}" if tail else ""
     raise typer.Exit(
-        code=_error(f"Worker failed to start within {startup_timeout_s:.1f}s.{tail_suffix}")
+        code=_error(
+            f"{process_label} failed to start within {startup_timeout_s:.1f}s.{tail_suffix}"
+        )
     )
+
+
+def _infra_worker_pid_file(index: int) -> Path:
+    return DEFAULT_INFRA_DIR / f"worker-{index}.pid"
+
+
+def _infra_worker_log_file(index: int) -> Path:
+    return DEFAULT_INFRA_DIR / f"worker-{index}.log"
+
+
+def _ensure_no_active_infra_workers_or_exit(infra_dir: Path) -> None:
+    for pid_file in sorted(infra_dir.glob("worker-*.pid")):
+        existing_pid = _read_pid(pid_file)
+        if existing_pid is None:
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+            continue
+        if _is_process_alive(existing_pid):
+            raise typer.Exit(
+                code=_error(
+                    f"Infra worker seems already running with pid={existing_pid}. "
+                    "Use `vikhry infra down` first."
+                )
+            )
+        _remove_pid_file_if_matches(pid_file, existing_pid)
+
+
+def _ensure_docker_available_or_exit() -> None:
+    docker_binary = shutil.which("docker")
+    if docker_binary is None:
+        raise typer.Exit(
+            code=_error("Docker CLI is not installed. `vikhry infra up` requires Docker.")
+        )
+
+    try:
+        result = subprocess.run(
+            [docker_binary, "info"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise typer.Exit(code=_error(f"Failed to execute Docker CLI: {exc}")) from exc
+
+    if result.returncode == 0:
+        return
+
+    detail = (result.stderr or result.stdout).strip() or "Docker daemon is unavailable."
+    raise typer.Exit(code=_error(f"Docker is unavailable: {detail}"))
+
+
+def _ensure_infra_redis_container_available_for_up_or_exit(container_name: str) -> None:
+    state = _docker_container_state(container_name)
+    if state is None:
+        return
+    if state in {"created", "dead", "exited"}:
+        _remove_infra_redis_container(container_name)
+        return
+    raise typer.Exit(
+        code=_error(
+            f"Redis container `{container_name}` already exists with state `{state}`. "
+            "Use `vikhry infra down` first."
+        )
+    )
+
+
+def _start_infra_redis_or_exit(container_name: str) -> None:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                container_name,
+                "--publish",
+                "6379:6379",
+                DEFAULT_INFRA_REDIS_IMAGE,
+                "redis-server",
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise typer.Exit(code=_error(f"Failed to start Redis container: {exc}")) from exc
+
+    if result.returncode == 0:
+        return
+
+    detail = (result.stderr or result.stdout).strip() or "docker run failed"
+    raise typer.Exit(code=_error(f"Failed to start Redis container: {detail}"))
+
+
+def _wait_for_redis_ready_or_exit(redis_url: str, timeout_s: float) -> None:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+
+    while time.time() < deadline:
+        client = None
+        try:
+            client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
+            )
+            client.ping()
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(0.2)
+        finally:
+            if client is not None:
+                client.close()
+
+    suffix = f": {last_error}" if last_error is not None else ""
+    raise typer.Exit(code=_error(f"Redis did not become ready within {timeout_s:.1f}s{suffix}"))
+
+
+def _stop_process_from_pid_file(pid_file: Path, *, process_label: str) -> bool:
+    pid = _read_pid(pid_file)
+    if pid is None:
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+        return False
+
+    if not _is_process_alive(pid):
+        _remove_pid_file_if_matches(pid_file, pid)
+        return True
+
+    if _send_stop_signal_and_wait(pid, signal.SIGINT, 3.0):
+        _remove_pid_file_if_matches(pid_file, pid)
+        return True
+
+    if _send_stop_signal_and_wait(pid, signal.SIGTERM, 3.0):
+        _remove_pid_file_if_matches(pid_file, pid)
+        return True
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not _is_process_alive(pid):
+            _remove_pid_file_if_matches(pid_file, pid)
+            return True
+        time.sleep(0.1)
+
+    typer.secho(
+        f"Failed to stop {process_label} process {pid}.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+    return False
+
+
+def _cleanup_infra_runtime(
+    *,
+    worker_pid_files: list[Path],
+    orchestrator_pid_file: Path | None,
+    redis_container_name: str | None,
+) -> None:
+    for pid_file in reversed(worker_pid_files):
+        _stop_process_from_pid_file(pid_file, process_label=pid_file.stem)
+
+    if orchestrator_pid_file is not None:
+        _stop_process_from_pid_file(
+            orchestrator_pid_file,
+            process_label="infra orchestrator",
+        )
+
+    if redis_container_name is not None:
+        _remove_infra_redis_container(redis_container_name)
+
+
+def _remove_infra_redis_container(container_name: str) -> bool:
+    try:
+        state = _docker_container_state(container_name)
+    except typer.Exit:
+        return False
+    if state is None:
+        return False
+
+    try:
+        result = subprocess.run(
+            ["docker", "rm", "--force", container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+
+    return result.returncode == 0
+
+
+def _docker_container_state(container_name: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["docker", "container", "inspect", "-f", "{{.State.Status}}", container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise typer.Exit(code=_error(f"Failed to inspect Docker container: {exc}")) from exc
+
+    if result.returncode == 0:
+        value = result.stdout.strip()
+        return value or None
+
+    detail = (result.stderr or result.stdout).strip()
+    if "No such object" in detail or "No such container" in detail:
+        return None
+
+    raise typer.Exit(code=_error(f"Failed to inspect Docker container `{container_name}`: {detail}"))
 
 
 def _ensure_pid_file_writable_or_exit(pid_file: Path) -> None:

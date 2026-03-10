@@ -1,47 +1,89 @@
-# CLI утилита
+# CLI
 
-## Основные задачи
-1. Предоставлять единую точку для запуска всех компонентов системы (оркестратор, воркеры). Примерно так:
-    ```bash
-    vikhry orchestrator start --host 127.0.0.1 --port 8080 --redis-url redis://127.0.0.1:6379/0
-    vikhry orchestrator stop
-    vikhry worker start --redis-url redis://127.0.0.1:6379/0
-    vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://api.example.com
-    vikhry worker stop
-    ```
-2. Предоставлять API для управления тестами, например:
-    ```bash
-    vikhry test start --users <number>
-    vikhry test stop
-    vikhry test change-users --users <number>
-    ```
-3. Не использовать конфигурационные файлы. Все runtime-параметры передаются только через аргументы командной строки.
+## Goals
 
-## Алгоритм работы
-Для своей работы использует пакет typer.
+The CLI is the single entrypoint for:
 
-Запускает orchestrator и worker в detach-режиме по умолчанию.
-Для foreground-запуска используется `--foreground`.
+1. starting and stopping runtime components;
+2. bootstrapping local infrastructure;
+3. controlling test lifecycle through the orchestrator API.
 
-Поддерживается PID-based stop:
+Main command groups:
+- `vikhry orchestrator`
+- `vikhry worker`
+- `vikhry test`
+- `vikhry infra`
+
+## Common commands
+
+```bash
+vikhry orchestrator start --host 127.0.0.1 --port 8080 --redis-url redis://127.0.0.1:6379/0
+vikhry worker start --scenario my_scenario:DemoVU --http-base-url https://api.example.com
+vikhry test start --users 100 --orchestrator-url http://127.0.0.1:8080
+vikhry test change-users --users 150 --orchestrator-url http://127.0.0.1:8080
+vikhry test stop --orchestrator-url http://127.0.0.1:8080
+```
+
+## Local infrastructure bootstrap
+
+```bash
+vikhry infra up --worker-count 3 --scenario my_scenario:DemoVU
+vikhry infra down
+```
+
+`infra up`:
+- checks Docker CLI and daemon availability;
+- starts Redis in the `vikhry-redis-infra` container;
+- starts the orchestrator in detached mode;
+- starts the requested number of workers in detached mode;
+- performs best-effort cleanup if startup fails halfway through.
+
+## Runtime model
+
+By default:
+- `orchestrator start` runs detached;
+- `worker start` runs detached;
+- `infra up` stores `pid` and `log` files under the runtime directory.
+
+Foreground mode is available with `--foreground`.
+
+## Process control
+
+PID-based stop commands:
 - `vikhry orchestrator stop --pid-file ... [--timeout-s ...] [--force]`
 - `vikhry worker stop --pid-file ... [--timeout-s ...] [--force]`
 
-Для работы с orchestrator api использует pyreqwest.
-
-Значения по умолчанию (если нужны) задаются в CLI-опциях, а не во внешнем конфиге.
-
-Worker runtime-опции сценария:
-- `--scenario module.path:ClassName` — класс VU для запуска (default `vikhry.runtime.defaults:IdleVU`);
-- `--http-base-url` — base URL для относительных HTTP шагов;
-- `--vu-idle-sleep-s` — idle sleep интервал VU loop.
-- `--vu-startup-jitter-ms` — максимальный случайный стартовый сдвиг VU в миллисекундах (default `5`).
-
-Orchestrator runtime-опция сценария:
-- `--scenario module.path:ClassName` — тот же формат импорта, что и у worker; используется для извлечения `@resource` и сигнатуры `VU.on_init`.
-
-### Runtime файлы (`pid`, `log`)
-
-По умолчанию используются пути:
+Default runtime directories:
 - macOS: `~/Library/Caches/vikhry/`
-- Linux: `$XDG_RUNTIME_DIR/vikhry/` или `/run/user/<uid>/vikhry/`, fallback `/tmp/vikhry/`
+- Linux: `$XDG_RUNTIME_DIR/vikhry/` or `/run/user/<uid>/vikhry/`, fallback `/tmp/vikhry/`
+
+`infra` uses the subdirectory `.../vikhry/infra/`.
+
+## Scenario-related options
+
+Worker options:
+- `--scenario module.path:ClassName`
+- `--http-base-url`
+- `--vu-idle-sleep-s`
+- `--vu-startup-jitter-ms`
+
+Orchestrator options:
+- `--scenario module.path:ClassName`
+
+The orchestrator uses the scenario import path to discover:
+- declared resources;
+- the `VU.on_init` parameter schema.
+
+## Test control
+
+The `vikhry test` group talks to the orchestrator over HTTP using `pyreqwest`.
+
+Supported actions:
+- `start`
+- `change-users`
+- `stop`
+
+`start` supports:
+- `--users`
+- `--init-param key=value`
+- `--init-params-json '{...}'`

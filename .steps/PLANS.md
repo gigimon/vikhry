@@ -268,3 +268,45 @@
 [ ] Добавить переключение/фильтры для просмотра ошибок по source (`lifecycle`, `step`, `http`, будущие клиенты).
 [ ] Ограничить отображение редких кодов (top-K + `OTHER`) для стабильной читаемости.
 [ ] Добавить frontend и integration тесты на новые поля метрик и визуализацию breakdown.
+
+# First Release Description
+
+Цель: подготовить первый релиз `vikhry`, в котором проект можно:
+- установить как Python-пакет с уже встроенным UI;
+- запустить локально одной CLI-командой без ручного старта Redis/orchestrator/worker;
+- публиковать артефакты через GitHub Actions;
+- документировать и презентовать через отдельный documentation layer.
+
+Зафиксированные решения:
+- существующий React + Vite frontend не переписывается, а собирается в статические assets;
+- UI включается в Python wheel/sdist и отдается самим orchestrator как SPA;
+- локальная команда `vikhry infra up` отвечает за подъем Redis в Docker и запуск orchestrator + N worker-процессов;
+- при отсутствии Docker CLI или недоступном daemon `infra` завершает запуск с явной ошибкой и cleanup уже поднятых процессов;
+- release automation делится на два workflow: Python artifacts/release и Docker image для UI;
+- публичная документация пока хранится как plain Markdown в `docs/`, генератор сайта будет выбран отдельно.
+
+# First Release Implementation
+
+## Step 34: Встраивание UI в Python-пакет
+[x] Добавить reproducible build frontend (`npm ci && npm run build`) и целевую директорию для встроенных assets.
+[x] Настроить packaging (`hatchling`) так, чтобы wheel/sdist включали собранный UI.
+[x] На стороне orchestrator реализовать раздачу встроенной статики и корневого `index.html`.
+[x] Обновить README/docs под запуск UI из Python-пакета без отдельного frontend dev-server.
+
+## Step 35: CLI-команда `infra`
+[x] Добавить группу `vikhry infra` с базовой командой запуска локальной инфраструктуры.
+[x] Реализовать проверки Docker CLI/daemon и запуск Redis-контейнера с предсказуемым именем/портом.
+[x] Реализовать запуск orchestrator и `--worker-count` worker-процессов с единым `--scenario`.
+[x] Добавить cleanup: остановка worker/orchestrator и удаление Redis-контейнера при ошибке старта или прерывании.
+
+## Step 36: GitHub Actions для релиза
+[x] Добавить workflow сборки Python artifacts (frontend build + wheel + sdist + artifact upload).
+[x] Добавить workflow сборки Docker image для UI и публикации в registry.
+[x] Добавить trigger-стратегию для tags/releases и базовые проверки перед публикацией.
+[x] Задокументировать release-процесс и необходимые GitHub secrets.
+
+## Step 37: Public Documentation
+[x] Подготовить landing/quickstart/release markdown-страницы на основе текущих `README.md` и `docs/*.md`.
+[x] Вынести инструкции по `infra`, packaged UI и release artifacts.
+[x] Перевести публичную документацию на английский.
+[ ] Выбрать и внедрить новый documentation generator/publishing flow.

@@ -1,21 +1,23 @@
-# DSL: Сценарии и ресурсы в vikhry
+# Scenario DSL
 
-## Virtual User (VU)
+## Virtual User
 
-VU описывается как Python-класс с асинхронными шагами.
+A scenario is defined as a Python class derived from `VU`.
 
-### Пример
+Example:
 
 ```python
-from vikhry import VU, emit_metric, metric, resource, step
+from vikhry import ReqwestClient, VU, emit_metric, metric, resource, step
 
 
 @resource(name="users")
-async def create_user(id, ctx):
-    return {"resource_id": "..."}
+async def create_user(resource_id, ctx):
+    return {"resource_id": str(resource_id)}
 
 
 class MyVU(VU):
+    http = ReqwestClient(timeout=5)
+
     async def on_init(self, tenant: str, warmup: int = 1):
         self.tenant = tenant
         self.warmup = warmup
@@ -25,11 +27,11 @@ class MyVU(VU):
 
     @step(weight=3.0)
     async def get_catalog(self):
-        await self.http.get("https://httpbin.org/get")
+        await self.http.get("/catalog")
 
-    @step(weight=1.0, requires=("is_authed",))
+    @step(weight=1.0, requires=("get_catalog",), timeout=5.0)
     async def create_order(self):
-        await emit_metric(name="order_validation", status=True, time=1.2, phase="before_request")
+        await emit_metric(name="order_validation", status=True, time=1.2)
         await self.http.post("/order")
 
     @metric(name="helper_auth", component="auth")
@@ -37,78 +39,75 @@ class MyVU(VU):
         await self.http.post("/auth")
 ```
 
-Для кастомизации HTTP-клиента через фабрику в `on_init`:
+## `on_init` parameters
 
-```python
-from vikhry import ReqwestClient, VU
-
-class MyVU(VU):
-    http = ReqwestClient(timeout=5)
-
-    async def on_init(self, base_url: str):
-        self.http = self.http(base_url=base_url)
-```
-
-Параметры `on_init` orchestrator извлекает из scenario-файла и отдает через:
+The orchestrator extracts `VU.on_init` parameters from the scenario and exposes them through:
 - `GET /scenario/on_init_params`
 
-Затем эти параметры можно передать в:
-- `POST /start_test` через поле `init_params`
-- `vikhry test start --init-param key=value` или `--init-params-json '{...}'`
+They can then be passed to:
+- `POST /start_test` through `init_params`
+- `vikhry test start --init-param key=value`
+- `vikhry test start --init-params-json '{...}'`
 
-Сценарий запускается worker'ом через CLI:
+## Starting a scenario
 
 ```bash
-vikhry worker start --scenario my_load.scenarios:MyVU --http-base-url https://api.example.com
+vikhry worker start --scenario my_scenario:MyVU --http-base-url https://api.example.com
 ```
 
-Декоратор, для указания шага:
+## `@step(...)`
+
 ```python
 @step(
-  name=None,
-  weight=1.0,
-  every_s=None,
-  requires=(),
-  timeout=None,
-  **strategy_kwargs,
+    name=None,
+    weight=1.0,
+    every_s=None,
+    requires=(),
+    timeout=None,
+    **strategy_kwargs,
 )
 ```
 
-Описание:
-- name - имя шага, по умолчанию — имя функции.
-- weight — участвует в weighted random выборе.
-- every_s — периодическое выполнение.
-- requires — указания тех степов, которые должны быть выполнены до этого шага. Это может быть полезно для создания зависимостей между шагами, например, чтобы гарантировать, что пользователь аутентифицирован перед созданием заказа.
-- timeout — максимальное время выполнения шага, после которого он будет считаться провалившимся.
-- `**strategy_kwargs` — произвольные параметры шага, доступные стратегиям через `bound_step.spec.strategy_kwargs`.
+Parameters:
+- `name`
+  Step name. Defaults to the function name.
+- `weight`
+  Weight used by the scheduler when selecting among eligible steps.
+- `every_s`
+  Minimum interval between executions.
+- `requires`
+  List of prerequisite step names that must already have succeeded.
+- `timeout`
+  Maximum allowed step runtime.
+- `**strategy_kwargs`
+  Extra metadata available to scheduling strategies.
 
 Runtime behavior:
-- шаги выбираются по weighted random среди eligible step;
-- `requires` проверяются по именам успешно выполненных step;
-- `every_s` ограничивает частоту повторного запуска шага;
-- по каждому запуску шага worker пишет событие метрики (`name`, `step`, `status`, `time`) в `metric:worker:{worker_id}`.
-- HTTP-клиент автоматически отправляет метрики по каждому запросу, где `name` = path (например `/page1`).
-- для ручной метрики используйте `await emit_metric(...)`, для метрики вокруг функции — `@metric(...)`.
+- eligible steps are chosen by weighted random selection;
+- `requires` gates step eligibility;
+- `every_s` limits execution frequency;
+- each step execution produces metric events;
+- HTTP requests also emit metrics automatically.
 
+## Global resources
 
-## Глобальные ресурсы
+Resources are defined with `@resource`.
 
-Ресурсы описываются отдельными функциями с декоратором.
-
-Пример:
+Example:
 
 ```python
-@resource(
-  name="users"
-)
-async def make_user(id, ctx):
-    resp = await ctx.http.post("/register")
-    return resp.json()
+@resource(name="users")
+async def make_user(resource_id, ctx):
+    response = await ctx.http.post("/register")
+    return response.json()
 ```
 
-Каждая функция создающая ресурсы принимает несколько параметров:
-1. id - уникальный идентификатор ресурса, который будет использоваться для его получения и удаления.
-2. ctx - контекст, который содержит полезные об окружении (данные о воркере, http клиент и т.д.)
+Factory arguments:
+1. `resource_id`
+   Unique identifier for the resource instance
+2. `ctx`
+   Runtime context with environment-specific helpers
 
-В worker runtime `self.resources.acquire(name)` получает ресурс из глобального Redis-пула, а
-`self.resources.release(name, resource_id)` возвращает его обратно.
+Workers consume resources through:
+- `self.resources.acquire(name)`
+- `self.resources.release(name, resource_id)`

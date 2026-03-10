@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import redis.asyncio as redis
 import uvloop
@@ -21,6 +22,7 @@ from vikhry.orchestrator.services.resource_service import ResourceService
 from vikhry.orchestrator.services.worker_monitor import WorkerMonitor
 from vikhry.orchestrator.services.user_orchestration import UserOrchestrationService
 from vikhry.orchestrator.services.worker_presence import WorkerPresenceService
+from vikhry.ui_assets import resolve_ui_assets_dir
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,7 @@ class OrchestratorRuntime:
     worker_presence: WorkerPresenceService
     user_orchestration: UserOrchestrationService
     worker_monitor: WorkerMonitor
+    ui_assets_dir: Path | None
 
 
 def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntime]:
@@ -86,6 +89,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         worker_presence=worker_presence,
         user_orchestration=user_orchestration,
         worker_monitor=worker_monitor,
+        ui_assets_dir=resolve_ui_assets_dir(),
     )
 
     register_routes(
@@ -96,6 +100,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         resource_service=resource_service,
         metrics_service=metrics_service,
         scenario_on_init_spec=scenario_on_init_spec,
+        ui_assets_dir=runtime.ui_assets_dir,
     )
 
     @app.startup_handler
@@ -110,6 +115,10 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         await runtime.metrics_service.start()
         await runtime.metrics_service.refresh_now()
         await runtime.worker_monitor.start()
+        if runtime.ui_assets_dir is not None:
+            logger.info("UI assets enabled from %s", runtime.ui_assets_dir)
+        else:
+            logger.info("UI assets are not available; API-only mode is enabled")
         logger.info("orchestrator started")
 
     @app.shutdown_handler
