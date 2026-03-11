@@ -143,6 +143,8 @@ In a typical scenario:
 
 The default HTTP stack is instrumented, so HTTP calls also produce runtime metrics automatically.
 
+`self.http` is not limited to plain HTTP requests. It can also be backed by `JsonRPCClient`, in which case steps use `self.http.call(...)` instead of `get(...)` or `post(...)`.
+
 ## Lifecycle hooks around the run
 
 The current runtime lifecycle hooks are:

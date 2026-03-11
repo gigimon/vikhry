@@ -19,6 +19,11 @@ In practice:
 
 These two attributes are the main customization points for request behavior and step scheduling.
 
+The `http` attribute can now be backed by either:
+
+- `ReqwestClient` for request-oriented HTTP calls such as `get(...)` and `post(...)`
+- `JsonRPCClient` for JSON-RPC method calls through `call(...)`
+
 ## Default `self.http`
 
 Every `VU` has an `http` attribute. In the base runtime, the default is:
@@ -77,6 +82,62 @@ It is used to define defaults such as:
 - `timeout`
 
 When the VU starts, the runtime resolves that template into an instrumented per-user HTTP client.
+
+## Using `JsonRPCClient`
+
+`JsonRPCClient` is another lazy runtime client template. It is intended for scenarios where the target system exposes a JSON-RPC endpoint instead of classic REST-style routes.
+
+Example:
+
+```python
+from vikhry import JsonRPCClient, VU, step
+
+
+class DemoVU(VU):
+    http = JsonRPCClient(timeout=5.0)
+
+    async def on_init(self, base_url: str) -> None:
+        self.http = self.http(base_url=base_url)
+
+    @step(name="user.get")
+    async def get_user(self) -> None:
+        result = await self.http.call("user.get", {"user_id": 42})
+        if not result:
+            raise RuntimeError("empty result")
+```
+
+Important details:
+
+- `JsonRPCClient` requires a non-empty `base_url`
+- calls are sent as JSON-RPC `2.0` `POST` requests
+- the primary API is `self.http.call(method, params=None, ...)`
+- `params` can be a list, tuple, dict, or `None`
+
+At runtime, the client builds requests like:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "user.get",
+  "params": {
+    "user_id": 42
+  }
+}
+```
+
+The runtime also parses JSON-RPC responses and raises dedicated exceptions for protocol or RPC errors.
+
+## JSON-RPC metrics
+
+`JsonRPCClient` is instrumented by the runtime in the same way as `ReqwestClient`, but metrics are emitted with JSON-RPC-specific fields.
+
+Key differences:
+
+- metric `source` is `jsonrpc`
+- metric name is the RPC method name
+- RPC failures use normalized `result_code` values such as `JSONRPC_-32000`
+- metric payload may include `rpc_error_code` and `http_status`
 
 ## Default `step_strategy`
 
