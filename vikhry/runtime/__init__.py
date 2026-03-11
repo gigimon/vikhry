@@ -10,7 +10,7 @@ from vikhry.runtime.dsl import (
     resource,
     step,
 )
-from vikhry.runtime.http import ReqwestClient
+from vikhry.runtime.http import JsonRPCClient, ReqwestClient
 from vikhry.runtime.metrics import emit_metric, metric
 from vikhry.runtime.strategy import (
     ParallelReadyStrategy,
@@ -22,6 +22,7 @@ from vikhry.runtime.strategy import (
 __all__ = [
     "VU",
     "ParallelReadyStrategy",
+    "JsonRPCClient",
     "ReqwestClient",
     "SequentialWeightedStrategy",
     "StepSelection",
