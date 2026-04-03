@@ -12,6 +12,7 @@ from vikhry.worker.models.state import WorkerRuntimeState
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
 from vikhry.worker.services.command_dispatcher import WorkerCommandDispatcher
 from vikhry.worker.services.heartbeat import WorkerHeartbeatService
+from vikhry.worker.services.probes import WorkerProbeRuntime, load_probe_targets
 from vikhry.worker.services.vu_runtime import WorkerVURuntime, load_vu_type
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,14 @@ async def run_worker_async(settings: WorkerSettings) -> None:
         raise ValueError("worker_id must not be empty")
 
     logger.info(
-        "worker startup initiated (worker_id=%s, redis_url=%s, scenario=%s)",
+        "worker startup initiated (worker_id=%s, redis_url=%s, scenario=%s, run_probes=%s)",
         settings.worker_id,
         settings.redis_url,
         settings.scenario,
+        settings.run_probes,
     )
     vu_type = load_vu_type(settings.scenario)
+    probe_targets = load_probe_targets(settings.scenario) if settings.run_probes else ()
 
     shutdown_event = asyncio.Event()
     _install_signal_handlers(shutdown_event)
@@ -64,6 +67,12 @@ async def run_worker_async(settings: WorkerSettings) -> None:
         worker_id=settings.worker_id,
         interval_s=settings.heartbeat_interval_s,
     )
+    probe_runtime = WorkerProbeRuntime(
+        state_repo,
+        runtime_state=runtime_state,
+        worker_id=settings.worker_id,
+        probes=probe_targets,
+    )
     dispatcher = WorkerCommandDispatcher(
         state_repo=state_repo,
         worker_id=settings.worker_id,
@@ -77,11 +86,13 @@ async def run_worker_async(settings: WorkerSettings) -> None:
         await state_repo.register_worker(settings.worker_id)
         await heartbeat.mark_healthy()
         await heartbeat.start()
+        await probe_runtime.start()
         await dispatcher.start()
         logger.info("worker started (worker_id=%s)", settings.worker_id)
         await shutdown_event.wait()
     finally:
         await dispatcher.stop()
+        await probe_runtime.stop()
         await heartbeat.stop()
         try:
             await heartbeat.mark_unhealthy()

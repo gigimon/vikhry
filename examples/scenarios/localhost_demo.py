@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vikhry import ReqwestClient, VU, between, resource, step
+from vikhry import ReqwestClient, VU, between, probe, resource, step
 
 
 @resource(name="users")
@@ -24,6 +24,18 @@ async def create_session_resource(resource_id: int | str, _ctx: object) -> dict[
         "resource_id": rid,
         "seed_token": f"seed-token-{rid}",
     }
+
+
+@probe(name="page2_health", every_s=5.0, timeout=2.0)
+async def page2_health_probe() -> int:
+    """Example module-level probe for the dedicated probe dashboard."""
+    http = ReqwestClient(base_url="http://localhost:8000", timeout=2.0)()
+    try:
+        response = await http.get("/page2")
+        _ensure_success(response, "page2_health")
+        return int(getattr(response, "status", 0) or 0)
+    finally:
+        await http.close()
 
 
 class LocalhostDemoVU(VU):

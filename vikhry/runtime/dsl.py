@@ -12,6 +12,7 @@ from vikhry.runtime.strategy import SequentialWeightedStrategy, StepStrategy
 
 _STEP_SPEC_ATTR = "__vikhry_step_spec__"
 _RESOURCE_SPEC_ATTR = "__vikhry_resource_spec__"
+_PROBE_SPEC_ATTR = "__vikhry_probe_spec__"
 EverySpec = float | Callable[[], float] | None
 
 
@@ -30,6 +31,14 @@ class StepSpec:
 class ResourceSpec:
     name: str
     function_name: str
+
+
+@dataclass(slots=True, frozen=True)
+class ProbeSpec:
+    name: str
+    function_name: str
+    every_s: EverySpec
+    timeout: float | None
 
 
 @dataclass(slots=True)
@@ -147,6 +156,39 @@ def resource(*, name: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable
     return decorator
 
 
+def probe(
+    *,
+    name: str,
+    every_s: EverySpec,
+    timeout: float | None = None,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError("probe name must not be empty")
+    if every_s is None:
+        raise ValueError("probe every_s must be provided")
+    if not callable(every_s):
+        _validate_every_delay(float(every_s))
+    if timeout is not None and timeout <= 0:
+        raise ValueError("probe timeout must be > 0 when provided")
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError("probe target must be an async function")
+        setattr(
+            func,
+            _PROBE_SPEC_ATTR,
+            {
+                "name": normalized,
+                "every_s": every_s,
+                "timeout": timeout,
+            },
+        )
+        return func
+
+    return decorator
+
+
 def collect_vu_steps(vu_type: type[VU]) -> tuple[StepSpec, ...]:
     if not issubclass(vu_type, VU):
         raise TypeError("vu_type must inherit from VU")
@@ -212,6 +254,44 @@ def collect_resource_factories(namespace: dict[str, Any]) -> dict[str, Callable[
     return factories
 
 
+def collect_probe_specs(namespace: dict[str, Any]) -> tuple[ProbeSpec, ...]:
+    probes: list[ProbeSpec] = []
+    seen_names: set[str] = set()
+    for function_name, value in namespace.items():
+        raw = getattr(value, _PROBE_SPEC_ATTR, None)
+        if raw is None:
+            continue
+        if not _is_module_level_callable(function_name, value):
+            raise TypeError("probe target must be a module-level async function")
+
+        probe_name = str(raw.get("name", "")).strip()
+        if not probe_name:
+            raise ValueError("probe name must not be empty")
+        if probe_name in seen_names:
+            raise ValueError(f"duplicate probe name detected: {probe_name}")
+        seen_names.add(probe_name)
+
+        every_s = raw.get("every_s")
+        if every_s is None:
+            raise ValueError(f"probe `{probe_name}` must define every_s")
+        if not callable(every_s):
+            _validate_every_delay(float(every_s))
+
+        timeout = raw.get("timeout")
+        if timeout is not None and float(timeout) <= 0:
+            raise ValueError(f"probe `{probe_name}` timeout must be > 0 when provided")
+
+        probes.append(
+            ProbeSpec(
+                name=probe_name,
+                function_name=function_name,
+                every_s=every_s,
+                timeout=float(timeout) if timeout is not None else None,
+            )
+        )
+    return tuple(probes)
+
+
 def resolve_every_delay(every_s: EverySpec) -> float:
     if every_s is None:
         return 0.0
@@ -224,3 +304,10 @@ def _validate_every_delay(value: float) -> float:
     if value <= 0:
         raise ValueError("every_s must resolve to value > 0")
     return value
+
+
+def _is_module_level_callable(name: str, candidate: object) -> bool:
+    if not inspect.iscoroutinefunction(candidate):
+        return False
+    qualname = getattr(candidate, "__qualname__", "")
+    return qualname == name

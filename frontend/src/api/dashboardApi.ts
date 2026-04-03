@@ -2,6 +2,8 @@ import type {
   ApiErrorPayload,
   MetricsHistoryResponse,
   MetricsResponse,
+  ProbeHistoryResponse,
+  ProbesResponse,
   ReadyResponse,
   ResourcesResponse,
   ScenarioOnInitSpec,
@@ -74,6 +76,31 @@ export async function fetchMetricsHistory(
     params.set('from_ts', String(Math.max(0, Math.floor(options.fromTs))))
   }
   return requestJson<MetricsHistoryResponse>(`/metrics/history?${params.toString()}`)
+}
+
+export async function fetchProbes(options?: {
+  count?: number
+  includeEvents?: boolean
+  probeName?: string
+}): Promise<ProbesResponse> {
+  const params = new URLSearchParams()
+  params.set('count', String(options?.count ?? 240))
+  params.set('include_events', options?.includeEvents === false ? 'false' : 'true')
+  if (options?.probeName) {
+    params.set('probe_name', options.probeName)
+  }
+  return requestJson<ProbesResponse>(`/probes?${params.toString()}`)
+}
+
+export async function fetchProbeHistory(
+  probeName: string,
+  options?: { count?: number },
+): Promise<ProbeHistoryResponse> {
+  const params = new URLSearchParams({
+    probe_name: probeName,
+    count: String(options?.count ?? 240),
+  })
+  return requestJson<ProbeHistoryResponse>(`/probes/history?${params.toString()}`)
 }
 
 export async function fetchResources(): Promise<ResourcesResponse> {

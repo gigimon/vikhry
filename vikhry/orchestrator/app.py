@@ -14,10 +14,12 @@ from vikhry.orchestrator.models.settings import OrchestratorSettings
 from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
 from vikhry.orchestrator.scenario_loader import (
     load_on_init_spec_from_scenario,
+    load_probe_names_from_scenario,
     load_resource_names_from_scenario,
 )
 from vikhry.orchestrator.services.lifecycle_service import LifecycleService
 from vikhry.orchestrator.services.metrics_service import MetricsService
+from vikhry.orchestrator.services.probe_service import ProbeService
 from vikhry.orchestrator.services.resource_service import ResourceService
 from vikhry.orchestrator.services.worker_monitor import WorkerMonitor
 from vikhry.orchestrator.services.user_orchestration import UserOrchestrationService
@@ -32,6 +34,7 @@ class OrchestratorRuntime:
     redis_client: redis.Redis
     state_repo: TestStateRepository
     metrics_service: MetricsService
+    probe_service: ProbeService
     resource_service: ResourceService
     lifecycle_service: LifecycleService
     worker_presence: WorkerPresenceService
@@ -46,6 +49,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     state_repo = TestStateRepository(redis_client)
     scenario_resource_names = load_resource_names_from_scenario(settings.scenario)
+    scenario_probe_names = load_probe_names_from_scenario(settings.scenario)
     scenario_on_init_spec = load_on_init_spec_from_scenario(settings.scenario)
     worker_presence = WorkerPresenceService(
         state_repo=state_repo,
@@ -64,15 +68,26 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         scenario_resource_names=scenario_resource_names,
         default_prepare_counts={},
     )
+    probe_service = ProbeService(
+        state_repo=state_repo,
+        declared_probe_names=scenario_probe_names,
+        poll_interval_s=settings.metrics_poll_interval_s,
+        window_s=settings.metrics_window_s,
+        max_events_per_probe_per_poll=settings.metrics_max_events_per_poll,
+    )
     user_orchestration = UserOrchestrationService(
         state_repo=state_repo,
         worker_presence=worker_presence,
     )
+    async def _reset_observability_state() -> None:
+        await metrics_service.reset_for_new_run()
+        await probe_service.reset_for_new_run()
+
     lifecycle_service = LifecycleService(
         state_repo=state_repo,
         user_orchestration=user_orchestration,
         resource_service=resource_service,
-        on_before_start_test=metrics_service.reset_for_new_run,
+        on_before_start_test=_reset_observability_state,
     )
     worker_monitor = WorkerMonitor(
         scan_interval_s=settings.worker_scan_interval_s,
@@ -84,6 +99,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         redis_client=redis_client,
         state_repo=state_repo,
         metrics_service=metrics_service,
+        probe_service=probe_service,
         resource_service=resource_service,
         lifecycle_service=lifecycle_service,
         worker_presence=worker_presence,
@@ -99,6 +115,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         worker_presence=worker_presence,
         resource_service=resource_service,
         metrics_service=metrics_service,
+        probe_service=probe_service,
         scenario_on_init_spec=scenario_on_init_spec,
         ui_assets_dir=runtime.ui_assets_dir,
     )
@@ -114,6 +131,8 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         await runtime.worker_presence.refresh_cache()
         await runtime.metrics_service.start()
         await runtime.metrics_service.refresh_now()
+        await runtime.probe_service.start()
+        await runtime.probe_service.refresh_now()
         await runtime.worker_monitor.start()
         if runtime.ui_assets_dir is not None:
             logger.info("UI assets enabled from %s", runtime.ui_assets_dir)
@@ -124,6 +143,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
     @app.shutdown_handler
     async def on_shutdown() -> None:
         await runtime.worker_monitor.stop()
+        await runtime.probe_service.stop()
         await runtime.metrics_service.stop()
         await runtime.redis_client.aclose()
         logger.info("orchestrator stopped")

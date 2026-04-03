@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from vikhry.runtime import ReqwestClient, VU, between, bind_steps, collect_resource_factories, collect_vu_steps, resource, step
+from vikhry.runtime import (
+    ProbeSpec,
+    ReqwestClient,
+    VU,
+    between,
+    bind_steps,
+    collect_probe_specs,
+    collect_resource_factories,
+    collect_vu_steps,
+    probe,
+    resource,
+    step,
+)
 from vikhry.runtime.dsl import resolve_every_delay
 
 
@@ -67,6 +79,21 @@ class _BaseInitVU(VU):
     http = ReqwestClient(timeout=5)
 
 
+@probe(name="db_health", every_s=2.5, timeout=1.0)
+async def _probe_db_health() -> int:
+    return 1
+
+
+@probe(name="shared", every_s=1.0)
+async def _first_shared_probe() -> int:
+    return 1
+
+
+@probe(name="shared", every_s=2.0)
+async def _second_shared_probe() -> int:
+    return 2
+
+
 def _make_vu(vu_type: type[VU]) -> VU:
     return vu_type(
         user_id="u1",
@@ -119,12 +146,70 @@ def test_resource_decorator_registration_spec() -> None:
     assert factories["users"] is make_user
 
 
+def test_probe_decorator_registration_spec() -> None:
+    specs = collect_probe_specs({"_probe_db_health": _probe_db_health})
+    assert specs == (
+        ProbeSpec(
+            name="db_health",
+            function_name="_probe_db_health",
+            every_s=2.5,
+            timeout=1.0,
+        ),
+    )
+
+
+def test_duplicate_probe_names_raise_spec() -> None:
+    with pytest.raises(ValueError, match="duplicate probe name"):
+        collect_probe_specs(
+            {
+                "_first_shared_probe": _first_shared_probe,
+                "_second_shared_probe": _second_shared_probe,
+            }
+        )
+
+
+def test_collect_probe_specs_rejects_nested_functions_spec() -> None:
+    def _build_probe():
+        @probe(name="nested", every_s=1.0)
+        async def nested_probe() -> int:
+            return 1
+
+        return nested_probe
+
+    nested_probe = _build_probe()
+
+    with pytest.raises(TypeError, match="module-level async function"):
+        collect_probe_specs({"nested_probe": nested_probe})
+
+
 def test_step_requires_async_function_spec() -> None:
     with pytest.raises(TypeError, match="async function"):
 
         @step()
         def sync_step(self) -> None:  # noqa: ANN001
             return None
+
+
+def test_probe_requires_async_function_spec() -> None:
+    with pytest.raises(TypeError, match="async function"):
+
+        @probe(name="sync_probe", every_s=1.0)
+        def sync_probe() -> None:
+            return None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"name": " ", "every_s": 1.0}, "probe name must not be empty"),
+        ({"name": "probe", "every_s": None}, "probe every_s must be provided"),
+        ({"name": "probe", "every_s": 0.0}, "every_s must resolve to value > 0"),
+        ({"name": "probe", "every_s": 1.0, "timeout": 0.0}, "probe timeout must be > 0"),
+    ],
+)
+def test_probe_validation_spec(kwargs: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        probe(**kwargs)
 
 
 def test_between_returns_delay_in_range_spec() -> None:

@@ -1,6 +1,6 @@
 """vikhry package."""
 
-from vikhry.runtime import ReqwestClient, VU, between, emit_metric, metric, resource, step
+from vikhry.runtime import ReqwestClient, VU, between, emit_metric, metric, probe, resource, step
 
 __all__ = [
     "ReqwestClient",
@@ -8,6 +8,7 @@ __all__ = [
     "between",
     "emit_metric",
     "metric",
+    "probe",
     "resource",
     "step",
 ]

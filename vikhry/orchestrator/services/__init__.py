@@ -1,6 +1,7 @@
 """Service layer for orchestrator."""
 
 from vikhry.orchestrator.services.metrics_service import MetricsService
+from vikhry.orchestrator.services.probe_service import ProbeService
 from vikhry.orchestrator.services.resource_service import ResourceService
 from vikhry.orchestrator.services.user_orchestration import (
     UserOrchestrationService,
@@ -14,6 +15,7 @@ from vikhry.orchestrator.services.worker_presence import (
 __all__ = [
     "MetricsService",
     "NoAliveWorkersError",
+    "ProbeService",
     "ResourceService",
     "UserOrchestrationService",
     "WorkerPresenceService",

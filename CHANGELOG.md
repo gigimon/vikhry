@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-04-03
+
+### Added
+
+- Added module-level probes via `@probe(...)`, worker-side probe execution with `--run-probes`, and orchestrator/API support for probe streams and recent history.
+- Added probe charts to the frontend as a dedicated `Probes` tab with one chart per probe and live refresh.
+- Added probe usage to the example scenario and documented how to run probe-enabled workers.
+
 ## 0.1.2 - 2026-03-11
 
 ### Added

@@ -181,3 +181,140 @@ async def test_workers_and_resources_endpoints_spec(
                 text=True,
                 check=False,
             )
+
+
+@pytest.mark.asyncio
+async def test_probes_endpoints_spec(
+    docker_redis_url: str,
+    state_repo: TestStateRepository,
+    tmp_path: Path,
+) -> None:
+    orchestrator_port = _find_free_port()
+    orchestrator_url = f"http://127.0.0.1:{orchestrator_port}"
+
+    orchestrator_pid_file = tmp_path / "orchestrator.pid"
+    orchestrator_log_file = tmp_path / "orchestrator.log"
+    orchestrator_started = False
+
+    try:
+        _run_cli(
+            "orchestrator",
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(orchestrator_port),
+            "--redis-url",
+            docker_redis_url,
+            "--worker-scan-interval-s",
+            "1",
+            "--heartbeat-timeout-s",
+            "10",
+            "--pid-file",
+            str(orchestrator_pid_file),
+            "--log-file",
+            str(orchestrator_log_file),
+            "--startup-timeout-s",
+            "10",
+        )
+        orchestrator_started = True
+
+        await _wait_until(
+            lambda: _fetch_json(f"{orchestrator_url}/ready") is not None,
+            timeout_s=10.0,
+        )
+
+        await state_repo.append_probe_event(
+            "db_health",
+            {
+                "name": "db_health",
+                "worker_id": "w-probe",
+                "ts_ms": 1_700_000_000_001,
+                "status": True,
+                "time": 3.2,
+                "value": 42,
+            },
+        )
+        await state_repo.append_probe_event(
+            "db_health",
+            {
+                "name": "db_health",
+                "worker_id": "w-probe",
+                "ts_ms": 1_700_000_000_002,
+                "status": False,
+                "time": 5.1,
+                "value": None,
+                "error_type": "RuntimeError",
+                "error_message": "boom",
+            },
+        )
+        await state_repo.append_probe_event(
+            "cache_health",
+            {
+                "name": "cache_health",
+                "worker_id": "w-probe",
+                "ts_ms": 1_700_000_000_003,
+                "status": True,
+                "time": 1.0,
+                "value": 7,
+            },
+        )
+
+        await _wait_until(
+            lambda: (_fetch_json(f"{orchestrator_url}/probes") or {}).get("probes"),
+            timeout_s=10.0,
+        )
+
+        probes_payload = _fetch_json(f"{orchestrator_url}/probes?include_events=false")
+        assert probes_payload is not None
+        probes = probes_payload["probes"]
+        assert isinstance(probes, list)
+        assert [probe["probe_name"] for probe in probes] == ["cache_health", "db_health"]
+
+        db_probe = probes[1]
+        assert db_probe["aggregate"] == {
+            "window_s": 60,
+            "successes": 1,
+            "errors": 1,
+            "last_ts_ms": 1_700_000_000_002,
+            "last_status": False,
+            "last_value": None,
+        }
+        assert db_probe["latest"] == {
+            "ts_ms": 1_700_000_000_002,
+            "status": False,
+            "value": None,
+            "time": 5.1,
+            "error_type": "RuntimeError",
+            "error_message": "boom",
+        }
+        assert db_probe["events"] is None
+
+        history_payload = _fetch_json(
+            f"{orchestrator_url}/probes/history?probe_name=db_health&count=2"
+        )
+        assert history_payload is not None
+        assert history_payload["probe_name"] == "db_health"
+        assert history_payload["count"] == 2
+        events = history_payload["events"]
+        assert isinstance(events, list)
+        assert [event["data"]["status"] for event in events] == [True, False]
+    finally:
+        if orchestrator_started:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "vikhry.cli",
+                    "orchestrator",
+                    "stop",
+                    "--pid-file",
+                    str(orchestrator_pid_file),
+                    "--timeout-s",
+                    "8",
+                    "--force",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )

@@ -95,6 +95,57 @@ export interface MetricsHistoryResponse {
   duration_ms: number
 }
 
+export type ProbeScalar = string | number | boolean | null
+
+export interface ProbeAggregate {
+  window_s: number
+  successes: number
+  errors: number
+  last_ts_ms: number | null
+  last_status: boolean | null
+  last_value: ProbeScalar
+}
+
+export interface ProbeLatest {
+  ts_ms: number | null
+  status: boolean | null
+  value: ProbeScalar
+  time: number | null
+  error_type: string | null
+  error_message: string | null
+}
+
+export interface ProbesResponse {
+  generated_at: number
+  lag: {
+    detected: boolean
+    probes_with_backlog: string[]
+  }
+  probes: Array<{
+    probe_name: string
+    last_event_id: string | null
+    aggregate: ProbeAggregate
+    latest: ProbeLatest | null
+    events: Array<{
+      event_id: string
+      data: Record<string, unknown>
+    }> | null
+  }>
+  count: number
+  include_events: boolean
+}
+
+export interface ProbeHistoryResponse {
+  generated_at: number
+  probe_name: string
+  count: number
+  last_event_id: string | null
+  events: Array<{
+    event_id: string
+    data: Record<string, unknown>
+  }>
+}
+
 export interface StatsRow {
   name: string
   isNested?: boolean

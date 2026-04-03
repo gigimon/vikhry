@@ -46,6 +46,10 @@ class WorkerStateRepository:
     def metric_stream_key(metric_id: str) -> str:
         return f"metric:{metric_id}"
 
+    @staticmethod
+    def probe_stream_key(probe_name: str) -> str:
+        return f"probe:{probe_name}"
+
     async def register_worker(self, worker_id: str) -> None:
         await self._redis.sadd("workers", worker_id)
 
@@ -103,6 +107,17 @@ class WorkerStateRepository:
         await self._redis.sadd("metrics", metric_id)
         event_id = await self._redis.xadd(
             self.metric_stream_key(metric_id),
+            {"data": orjson.dumps(event).decode("utf-8")},
+        )
+        return str(event_id)
+
+    async def register_probe_name(self, probe_name: str) -> None:
+        await self._redis.sadd("probes", probe_name)
+
+    async def append_probe_event(self, probe_name: str, event: dict[str, Any]) -> str:
+        await self.register_probe_name(probe_name)
+        event_id = await self._redis.xadd(
+            self.probe_stream_key(probe_name),
             {"data": orjson.dumps(event).decode("utf-8")},
         )
         return str(event_id)

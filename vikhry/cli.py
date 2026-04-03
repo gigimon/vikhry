@@ -259,6 +259,13 @@ def worker_start(
             help="Scenario import path in `module.path:ClassName` format.",
         ),
     ] = "vikhry.runtime.defaults:IdleVU",
+    run_probes: Annotated[
+        bool,
+        typer.Option(
+            "--run-probes/--no-run-probes",
+            help="Enable module-level probes on this worker.",
+        ),
+    ] = False,
     http_base_url: Annotated[
         str,
         typer.Option(
@@ -302,6 +309,7 @@ def worker_start(
         command_poll_timeout_s=command_poll_timeout_s,
         graceful_stop_timeout_s=graceful_stop_timeout_s,
         scenario=scenario,
+        run_probes=run_probes,
         http_base_url=http_base_url,
         vu_idle_sleep_s=vu_idle_sleep_s,
         vu_startup_jitter_ms=vu_startup_jitter_ms,
@@ -342,6 +350,13 @@ def worker_serve(
             help="Scenario import path in `module.path:ClassName` format.",
         ),
     ] = "vikhry.runtime.defaults:IdleVU",
+    run_probes: Annotated[
+        bool,
+        typer.Option(
+            "--run-probes/--no-run-probes",
+            help="Enable module-level probes on this worker.",
+        ),
+    ] = False,
     http_base_url: Annotated[
         str,
         typer.Option(
@@ -375,6 +390,7 @@ def worker_serve(
         command_poll_timeout_s=command_poll_timeout_s,
         graceful_stop_timeout_s=graceful_stop_timeout_s,
         scenario=scenario,
+        run_probes=run_probes,
         http_base_url=http_base_url,
         vu_idle_sleep_s=vu_idle_sleep_s,
         vu_startup_jitter_ms=vu_startup_jitter_ms,
@@ -749,6 +765,11 @@ def _start_worker_detached(
         str(settings.graceful_stop_timeout_s),
         "--scenario",
         settings.scenario,
+        *(
+            ["--run-probes"]
+            if settings.run_probes
+            else []
+        ),
         "--http-base-url",
         settings.http_base_url,
         "--vu-idle-sleep-s",

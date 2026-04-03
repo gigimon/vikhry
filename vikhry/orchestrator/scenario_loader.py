@@ -6,7 +6,7 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from vikhry.runtime import VU, collect_resource_factories
+from vikhry.runtime import VU, collect_probe_specs, collect_resource_factories
 
 
 class ScenarioLoadError(RuntimeError):
@@ -33,6 +33,28 @@ def load_resource_names_from_scenario(scenario_path: str | Path | None) -> list[
             if resource_name:
                 resource_names.add(resource_name)
     return sorted(resource_names)
+
+
+def load_probe_names_from_scenario(scenario_path: str | Path | None) -> list[str]:
+    if not scenario_path:
+        return []
+
+    scenario_ref = str(scenario_path).strip()
+    if not _is_existing_file_path(scenario_ref) and _looks_like_import_path(scenario_ref):
+        module, _vu_type = _load_module_and_vu_type(scenario_ref)
+        probes = collect_probe_specs(module.__dict__)
+        return sorted(spec.name for spec in probes)
+
+    tree = _load_scenario_ast(scenario_ref)
+    probe_names: set[str] = set()
+    for node in tree.body if isinstance(tree, ast.Module) else []:
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            probe_name = _extract_probe_name(decorator)
+            if probe_name:
+                probe_names.add(probe_name)
+    return sorted(probe_names)
 
 
 def load_on_init_spec_from_scenario(scenario_path: str | Path | None) -> dict[str, Any]:
@@ -268,6 +290,20 @@ def _extract_resource_name(decorator: ast.AST) -> str | None:
     return None
 
 
+def _extract_probe_name(decorator: ast.AST) -> str | None:
+    if not isinstance(decorator, ast.Call):
+        return None
+    if not _is_probe_decorator(decorator.func):
+        return None
+
+    for keyword in decorator.keywords:
+        if keyword.arg != "name":
+            continue
+        return _as_nonempty_string(keyword.value)
+
+    return None
+
+
 def _find_first_vu_class(tree: ast.AST) -> ast.ClassDef | None:
     for node in tree.body if isinstance(tree, ast.Module) else []:
         if not isinstance(node, ast.ClassDef):
@@ -317,6 +353,14 @@ def _is_resource_decorator(func: ast.AST) -> bool:
         return func.id == "resource"
     if isinstance(func, ast.Attribute):
         return func.attr == "resource"
+    return False
+
+
+def _is_probe_decorator(func: ast.AST) -> bool:
+    if isinstance(func, ast.Name):
+        return func.id == "probe"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "probe"
     return False
 
 

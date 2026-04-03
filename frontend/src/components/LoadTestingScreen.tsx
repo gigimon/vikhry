@@ -33,6 +33,7 @@ import {
   startTest,
   stopTest,
 } from '../api/dashboardApi'
+import { ProbeChartsPanel } from './ProbeChartsScreen'
 import { ResourceCreateModal } from './ResourceCreateModal'
 import type {
   MetricsHistoryResponse,
@@ -47,7 +48,7 @@ import type {
 const REFRESH_INTERVAL_MS = 1_000
 const ERROR_EVENTS_FETCH_COUNT = 1000
 
-type TabId = 'statistics' | 'charts' | 'errors' | 'resources' | 'workers'
+type TabId = 'statistics' | 'charts' | 'probes' | 'errors' | 'resources' | 'workers'
 type StatsScope = 'window' | 'total'
 type StatsColumnId =
   | 'name'
@@ -113,6 +114,7 @@ interface TracebackRow {
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: 'statistics', label: 'Statistics' },
   { id: 'charts', label: 'Charts' },
+  { id: 'probes', label: 'Probes' },
   { id: 'errors', label: 'Errors' },
   { id: 'resources', label: 'Resources' },
   { id: 'workers', label: 'Workers' },
@@ -2733,6 +2735,8 @@ export function LoadTestingScreen() {
             </section>
           </>
         ) : null}
+
+        {activeTab === 'probes' ? <ProbeChartsPanel /> : null}
       </main>
 
       <section className="notification-stack" aria-live="polite" aria-atomic="true">

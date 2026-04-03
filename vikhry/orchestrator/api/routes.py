@@ -24,6 +24,7 @@ from vikhry.orchestrator.services.lifecycle_service import (
     LifecycleService,
 )
 from vikhry.orchestrator.services.metrics_service import MetricsService
+from vikhry.orchestrator.services.probe_service import ProbeService
 from vikhry.orchestrator.services.resource_service import ResourceService
 from vikhry.orchestrator.services.worker_presence import (
     NoAliveWorkersError,
@@ -55,6 +56,7 @@ def register_routes(
     worker_presence: WorkerPresenceService,
     resource_service: ResourceService,
     metrics_service: MetricsService,
+    probe_service: ProbeService,
     scenario_on_init_spec: dict[str, object],
     ui_assets_dir: Path | None,
 ) -> None:
@@ -200,6 +202,40 @@ def register_routes(
                 range_id=range_id,
             )
             result["duration_ms"] = int((time.perf_counter() - started_at) * 1000)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
+    @app.get("/probes")
+    async def probes(request: Request) -> dict[str, object] | Response:
+        try:
+            count = _query_int(request, key="count", default=20, min_value=0, max_value=1000)
+            probe_name = _query_value(request, "probe_name")
+            include_events = _query_bool(request, key="include_events", default=True)
+            result = await probe_service.get_probes(
+                probe_name=probe_name,
+                count=count,
+                include_events=include_events,
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
+    @app.get("/probes/history")
+    async def probes_history(request: Request) -> dict[str, object] | Response:
+        try:
+            probe_name = _query_value(request, "probe_name")
+            if probe_name is None:
+                raise ApiError(
+                    status=400,
+                    code="validation_error",
+                    message="Query param `probe_name` is required",
+                )
+            count = _query_int(request, key="count", default=100, min_value=0, max_value=1000)
+            result = await probe_service.get_probe_history(
+                probe_name=probe_name,
+                count=count,
+            )
             return result
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)

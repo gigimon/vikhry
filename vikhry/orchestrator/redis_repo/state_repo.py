@@ -71,6 +71,10 @@ class TestStateRepository:
         return f"metric:{metric_id}"
 
     @staticmethod
+    def probe_stream_key(probe_name: str) -> str:
+        return f"probe:{probe_name}"
+
+    @staticmethod
     def users_timeline_stream_key() -> str:
         return "users:timeline"
 
@@ -262,6 +266,13 @@ class TestStateRepository:
         metrics = await self._redis.smembers("metrics")
         return sorted(str(metric) for metric in metrics)
 
+    async def register_probe(self, probe_name: str) -> None:
+        await self._redis.sadd("probes", probe_name)
+
+    async def list_probes(self) -> list[str]:
+        probes = await self._redis.smembers("probes")
+        return sorted(str(probe) for probe in probes)
+
     async def clear_metrics_data(self) -> int:
         keys_to_delete: list[str] = ["metrics"]
         cursor = 0
@@ -279,6 +290,23 @@ class TestStateRepository:
             return 0
         return int(await self._redis.delete(*keys_to_delete))
 
+    async def clear_probe_data(self) -> int:
+        keys_to_delete: list[str] = ["probes"]
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(
+                cursor=cursor,
+                match="probe:*",
+                count=500,
+            )
+            if keys:
+                keys_to_delete.extend(str(key) for key in keys)
+            if cursor == 0:
+                break
+        if not keys_to_delete:
+            return 0
+        return int(await self._redis.delete(*keys_to_delete))
+
     async def clear_users_timeline(self) -> int:
         return int(await self._redis.delete(self.users_timeline_stream_key()))
 
@@ -286,6 +314,14 @@ class TestStateRepository:
         await self.register_metric(metric_id)
         event_id = await self._redis.xadd(
             self.metric_stream_key(metric_id),
+            {"data": orjson.dumps(event).decode("utf-8")},
+        )
+        return str(event_id)
+
+    async def append_probe_event(self, probe_name: str, event: dict[str, Any]) -> str:
+        await self.register_probe(probe_name)
+        event_id = await self._redis.xadd(
+            self.probe_stream_key(probe_name),
             {"data": orjson.dumps(event).decode("utf-8")},
         )
         return str(event_id)
@@ -341,6 +377,43 @@ class TestStateRepository:
             return await self.read_metric_events(metric_id=metric_id, count=count)
         items = await self.read_metric_events(
             metric_id=metric_id,
+            start=after_event_id,
+            end="+",
+            count=count + 1,
+        )
+        filtered = [item for item in items if item["event_id"] != after_event_id]
+        return filtered[:count]
+
+    async def read_probe_events(
+        self,
+        probe_name: str,
+        start: str = "-",
+        end: str = "+",
+        count: int = 100,
+    ) -> list[dict[str, Any]]:
+        items = await self._redis.xrange(
+            self.probe_stream_key(probe_name),
+            min=start,
+            max=end,
+            count=count,
+        )
+        parsed_items: list[dict[str, Any]] = []
+        for event_id, values in items:
+            raw_payload = values.get("data")
+            payload = orjson.loads(raw_payload) if raw_payload is not None else {}
+            parsed_items.append({"event_id": str(event_id), "data": payload})
+        return parsed_items
+
+    async def read_probe_events_after(
+        self,
+        probe_name: str,
+        after_event_id: str | None,
+        count: int = 100,
+    ) -> list[dict[str, Any]]:
+        if after_event_id is None:
+            return await self.read_probe_events(probe_name=probe_name, count=count)
+        items = await self.read_probe_events(
+            probe_name=probe_name,
             start=after_event_id,
             end="+",
             count=count + 1,

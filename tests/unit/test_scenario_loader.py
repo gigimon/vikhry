@@ -7,6 +7,7 @@ import pytest
 from vikhry.orchestrator.scenario_loader import (
     ScenarioLoadError,
     load_on_init_spec_from_scenario,
+    load_probe_names_from_scenario,
     load_resource_names_from_scenario,
 )
 
@@ -53,6 +54,29 @@ async def fn():
     )
 
     assert load_resource_names_from_scenario(scenario) == []
+
+
+def test_scenario_loader_extracts_probe_names_spec(tmp_path: Path) -> None:
+    scenario = tmp_path / "scenario.py"
+    scenario.write_text(
+        """
+from vikhry import probe
+
+@probe(name="db_health", every_s=1.0)
+async def poll_db():
+    return 1
+
+def wrapper():
+    @probe(name="nested", every_s=1.0)
+    async def nested_probe():
+        return 1
+    return nested_probe
+""".strip(),
+        encoding="utf-8",
+    )
+
+    names = load_probe_names_from_scenario(scenario)
+    assert names == ["db_health"]
 
 
 def test_scenario_loader_extracts_on_init_spec_spec(tmp_path: Path) -> None:
@@ -120,6 +144,40 @@ class FirstTestVU(VU):
         "tmp_case_resources.scenarios.first_test:FirstTestVU"
     )
     assert names == ["sessions", "users"]
+
+
+def test_scenario_loader_extracts_probe_names_from_import_path_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "tmp_case_probes" / "scenarios"
+    package.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tmp_case_probes" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    scenario = package / "probe_test.py"
+    scenario.write_text(
+        """
+from vikhry import VU, probe
+
+@probe(name="db_health", every_s=1.0)
+async def poll_db():
+    return 1
+
+@probe(name="cache_health", every_s=2.0, timeout=1.0)
+async def poll_cache():
+    return 2
+
+class ProbeVU(VU):
+    pass
+    """.strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    names = load_probe_names_from_scenario(
+        "tmp_case_probes.scenarios.probe_test:ProbeVU"
+    )
+    assert names == ["cache_health", "db_health"]
 
 
 def test_scenario_loader_extracts_on_init_spec_from_import_path_spec(
