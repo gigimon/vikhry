@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vikhry"
-version = "0.2.5"
+version = "0.2.6"
 description = "Async distributed load-testing framework contracts and runtime"
 readme = "README.md"
 requires-python = ">=3.14"

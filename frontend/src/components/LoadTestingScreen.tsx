@@ -312,14 +312,22 @@ function toStatsRows(
     const aggregate = scope === 'total' ? item.aggregate_total : item.aggregate
     const failure = aggregate.errors
     const success = Math.max(0, aggregate.requests - failure)
-    const eventData = latestMetricEventData(item)
     const kind = metricKind(item)
-    const stepName = normalizedString(eventData?.step ?? null)
-    const isStepMetric = kind === 'step' && stepName !== null && item.metric_id === stepName
+
+    // metric_id is "step_name/call_name" for nested metrics, plain name for steps
+    const slashIdx = item.metric_id.indexOf('/')
+    const hasStepPrefix = slashIdx > 0
+    const stepName = hasStepPrefix
+      ? item.metric_id.slice(0, slashIdx)
+      : (kind === 'step' ? item.metric_id : null)
+    const displayName = hasStepPrefix
+      ? item.metric_id.slice(slashIdx + 1)
+      : item.metric_id
+    const isStepMetric = kind === 'step' && !hasStepPrefix
 
     return {
       metricId: item.metric_id,
-      name: item.metric_id,
+      name: displayName,
       success,
       failure,
       medianMs: aggregate.latency_median_ms,

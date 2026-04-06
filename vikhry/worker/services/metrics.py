@@ -47,8 +47,15 @@ class WorkerMetricsPublisher:
 
     def _resolve_metric_id(self, metric: dict[str, Any]) -> str:
         raw_name = metric.get("name")
-        if isinstance(raw_name, str):
-            normalized_name = raw_name.strip()
-            if normalized_name:
-                return normalized_name
-        raise ValueError("metric payload must contain non-empty `name`")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("metric payload must contain non-empty `name`")
+        name = raw_name.strip()
+
+        source = str(metric.get("source", ""))
+        if source in ("step", "lifecycle"):
+            return name
+
+        step = str(metric.get("step", ""))
+        if step and step != "__unknown__":
+            return f"{step}/{name}"
+        return name

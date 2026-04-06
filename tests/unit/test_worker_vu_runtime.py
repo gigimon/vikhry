@@ -288,8 +288,14 @@ async def test_runtime_supports_manual_and_decorator_metrics_spec() -> None:
     await asyncio.gather(task, return_exceptions=True)
 
     by_name = {event["name"]: event for _, event in repo.metric_events}
-    assert {metric_id for metric_id, _ in repo.metric_events} >= {"ping", "helper_prepare", "/auth"}
-    assert all(metric_id == event["name"] for metric_id, event in repo.metric_events)
+    by_metric_id = {metric_id: event for metric_id, event in repo.metric_events}
+    # Step metric keeps plain name; non-step metrics nested under step get "step/name"
+    assert {metric_id for metric_id, _ in repo.metric_events} >= {"ping", "ping/helper_prepare", "ping//auth"}
+    # Step metric_id equals its name
+    assert by_metric_id["ping"]["name"] == "ping"
+    # Non-step metrics have step-prefixed metric_id
+    assert by_metric_id["ping/helper_prepare"]["name"] == "helper_prepare"
+    assert by_metric_id["ping//auth"]["name"] == "/auth"
     assert by_name["/auth"]["step"] == "ping"
     assert by_name["/auth"]["status"] is True
     assert by_name["/auth"]["source"] == "http"
