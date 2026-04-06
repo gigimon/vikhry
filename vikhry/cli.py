@@ -462,6 +462,7 @@ def infra_up(
             help="Scenario import path in `module.path:ClassName` format.",
         ),
     ],
+    run_probes: Annotated[bool, typer.Option("--run-probes/--no-run-probes")] = True,
 ) -> None:
     DEFAULT_INFRA_DIR.mkdir(parents=True, exist_ok=True)
     _ensure_no_active_orchestrator_or_exit(DEFAULT_INFRA_ORCHESTRATOR_PID_FILE)
@@ -495,6 +496,7 @@ def infra_up(
                 redis_url=DEFAULT_INFRA_REDIS_URL,
                 worker_id=f"infra-worker-{index}",
                 scenario=scenario,
+                run_probes=run_probes and index == 1,
             )
             pid_file = _infra_worker_pid_file(index)
             log_file = _infra_worker_log_file(index)

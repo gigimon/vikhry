@@ -344,7 +344,7 @@ function toStatsRows(
       continue
     }
 
-    if (row.kind === 'http' && row.stepName !== null && row.stepName !== '__unknown__') {
+    if (!row.isStepMetric && row.stepName !== null && row.stepName !== '__unknown__') {
       const grouped = httpRowsByStep.get(row.stepName) ?? []
       grouped.push(row)
       httpRowsByStep.set(row.stepName, grouped)
