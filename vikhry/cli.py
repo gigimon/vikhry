@@ -31,10 +31,12 @@ orchestrator_app = typer.Typer(no_args_is_help=True)
 test_app = typer.Typer(no_args_is_help=True)
 worker_app = typer.Typer(no_args_is_help=True)
 infra_app = typer.Typer(no_args_is_help=True)
+redis_app = typer.Typer(no_args_is_help=True)
 app.add_typer(orchestrator_app, name="orchestrator")
 app.add_typer(test_app, name="test")
 app.add_typer(worker_app, name="worker")
 app.add_typer(infra_app, name="infra")
+infra_app.add_typer(redis_app, name="redis")
 
 DEFAULT_ORCHESTRATOR_URL = "http://127.0.0.1:8080"
 
@@ -549,6 +551,128 @@ def infra_down() -> None:
     )
 
 
+@redis_app.command("start")
+def redis_start(
+    container_name: Annotated[str, typer.Option("--container-name")] = DEFAULT_INFRA_REDIS_CONTAINER_NAME,
+    image: Annotated[str, typer.Option("--image")] = DEFAULT_INFRA_REDIS_IMAGE,
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 6379,
+    timeout_s: Annotated[float, typer.Option("--timeout-s", min=0.1)] = 15.0,
+) -> None:
+    """Start the Redis container."""
+    _ensure_docker_available_or_exit()
+    state = _docker_container_state(container_name)
+
+    if state == "running":
+        typer.echo(f"Redis container `{container_name}` is already running.")
+        return
+
+    if state in {"created", "dead", "exited", "paused"}:
+        _remove_infra_redis_container(container_name)
+
+    _start_infra_redis_or_exit(container_name, image=image, port=port)
+    redis_url = f"redis://127.0.0.1:{port}/0"
+    _wait_for_redis_ready_or_exit(redis_url, timeout_s=timeout_s)
+    typer.echo(f"Redis started (container={container_name}, port={port}).")
+
+
+@redis_app.command("stop")
+def redis_stop(
+    container_name: Annotated[str, typer.Option("--container-name")] = DEFAULT_INFRA_REDIS_CONTAINER_NAME,
+) -> None:
+    """Stop and remove the Redis container."""
+    state = _docker_container_state(container_name)
+    if state is None:
+        typer.echo(f"Redis container `{container_name}` is not running.")
+        return
+
+    removed = _remove_infra_redis_container(container_name)
+    if removed:
+        typer.echo(f"Redis container `{container_name}` stopped and removed.")
+    else:
+        raise typer.Exit(code=_error(f"Failed to remove Redis container `{container_name}`."))
+
+
+@redis_app.command("restart")
+def redis_restart(
+    container_name: Annotated[str, typer.Option("--container-name")] = DEFAULT_INFRA_REDIS_CONTAINER_NAME,
+    image: Annotated[str, typer.Option("--image")] = DEFAULT_INFRA_REDIS_IMAGE,
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 6379,
+    timeout_s: Annotated[float, typer.Option("--timeout-s", min=0.1)] = 15.0,
+) -> None:
+    """Restart the Redis container (stop + start)."""
+    _ensure_docker_available_or_exit()
+    state = _docker_container_state(container_name)
+    if state is not None:
+        _remove_infra_redis_container(container_name)
+        typer.echo(f"Redis container `{container_name}` stopped.")
+
+    _start_infra_redis_or_exit(container_name, image=image, port=port)
+    redis_url = f"redis://127.0.0.1:{port}/0"
+    _wait_for_redis_ready_or_exit(redis_url, timeout_s=timeout_s)
+    typer.echo(f"Redis restarted (container={container_name}, port={port}).")
+
+
+@redis_app.command("status")
+def redis_status(
+    container_name: Annotated[str, typer.Option("--container-name")] = DEFAULT_INFRA_REDIS_CONTAINER_NAME,
+    redis_url: Annotated[str, typer.Option("--redis-url")] = DEFAULT_INFRA_REDIS_URL,
+) -> None:
+    """Show status of the Redis container and connectivity."""
+    state = _docker_container_state(container_name)
+    if state is None:
+        typer.echo(f"Container `{container_name}`: not found")
+    else:
+        typer.echo(f"Container `{container_name}`: {state}")
+
+    if state == "running":
+        client = None
+        try:
+            client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2.0,
+                socket_timeout=2.0,
+            )
+            info = client.info("server")
+            version = info.get("redis_version", "unknown")
+            uptime = info.get("uptime_in_seconds", 0)
+            uptime_str = str(timedelta(seconds=int(uptime)))
+            typer.echo(f"Redis version: {version}")
+            typer.echo(f"Uptime: {uptime_str}")
+            typer.echo("Ping: OK")
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"Ping: FAILED ({exc})")
+        finally:
+            if client is not None:
+                client.close()
+
+
+@redis_app.command("flush")
+def redis_flush(
+    redis_url: Annotated[str, typer.Option("--redis-url")] = DEFAULT_INFRA_REDIS_URL,
+    confirm: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Flush all data from Redis (FLUSHALL)."""
+    if not confirm:
+        typer.confirm("This will delete ALL data in Redis. Continue?", abort=True)
+
+    client = None
+    try:
+        client = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2.0,
+            socket_timeout=2.0,
+        )
+        client.flushall()
+        typer.echo("Redis flushed successfully.")
+    except Exception as exc:  # noqa: BLE001
+        raise typer.Exit(code=_error(f"Failed to flush Redis: {exc}")) from exc
+    finally:
+        if client is not None:
+            client.close()
+
+
 @test_app.command("start")
 def test_start(
     users: Annotated[int, typer.Option("--users", "-u", min=0)],
@@ -910,7 +1034,12 @@ def _ensure_infra_redis_container_available_for_up_or_exit(container_name: str) 
     )
 
 
-def _start_infra_redis_or_exit(container_name: str) -> None:
+def _start_infra_redis_or_exit(
+    container_name: str,
+    *,
+    image: str = DEFAULT_INFRA_REDIS_IMAGE,
+    port: int = 6379,
+) -> None:
     try:
         result = subprocess.run(
             [
@@ -920,8 +1049,8 @@ def _start_infra_redis_or_exit(container_name: str) -> None:
                 "--name",
                 container_name,
                 "--publish",
-                "6379:6379",
-                DEFAULT_INFRA_REDIS_IMAGE,
+                f"{port}:6379",
+                image,
                 "redis-server",
                 "--save",
                 "",

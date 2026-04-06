@@ -1,6 +1,5 @@
 import {
-  Clock3,
-  RefreshCcw,
+  ChevronDown,
   TriangleAlert,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -21,6 +20,19 @@ const PROBE_REFRESH_INTERVAL_MS = 1_000
 const PROBE_HISTORY_COUNT = 240
 
 type ProbeChartMode = 'value' | 'boolean' | 'status'
+type ProbeRangeId = '5m' | '15m' | '30m' | 'all'
+
+const probeRanges: Array<{ id: ProbeRangeId; label: string }> = [
+  { id: '5m', label: '5 minutes' },
+  { id: '15m', label: '15 minutes' },
+  { id: '30m', label: '30 minutes' },
+  { id: 'all', label: 'All time' },
+]
+const probeRangeToMs: Record<Exclude<ProbeRangeId, 'all'>, number> = {
+  '5m': 5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+}
 
 interface ProbeChartPoint {
   tsMs: number
@@ -187,7 +199,6 @@ function useProbeDashboardData() {
   const [ready, setReady] = useState<ReadyResponse | null>(null)
   const [probes, setProbes] = useState<ProbesResponse | null>(null)
   const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inFlightRef = useRef(false)
 
@@ -197,7 +208,6 @@ function useProbeDashboardData() {
     }
 
     inFlightRef.current = true
-    setRefreshing(true)
 
     const [readyResult, probesResult] = await Promise.allSettled([
       fetchReady(),
@@ -225,7 +235,6 @@ function useProbeDashboardData() {
 
     setError(errors.length > 0 ? Array.from(new Set(errors)).join(' | ') : null)
     setLoading(false)
-    setRefreshing(false)
     inFlightRef.current = false
   }, [])
 
@@ -247,14 +256,25 @@ function useProbeDashboardData() {
     ready,
     probes,
     loading,
-    refreshing,
     error,
     refresh,
   }
 }
 
+function filterPointsByRange(points: ProbeChartPoint[], rangeId: ProbeRangeId): ProbeChartPoint[] {
+  if (rangeId === 'all') {
+    return points
+  }
+  const windowMs = probeRangeToMs[rangeId]
+  const cutoff = Date.now() - windowMs
+  return points.filter((p) => p.tsMs >= cutoff)
+}
+
 export function ProbeChartsPanel() {
-  const { ready, probes, loading, refreshing, error, refresh } = useProbeDashboardData()
+  const { probes, loading, error } = useProbeDashboardData()
+  const [selectedRange, setSelectedRange] = useState<ProbeRangeId>('all')
+  const [rangeOpen, setRangeOpen] = useState(false)
+  const rangeContainerRef = useRef<HTMLDivElement | null>(null)
 
   const cards = useMemo(() => {
     if (!probes) {
@@ -271,42 +291,66 @@ export function ProbeChartsPanel() {
     return { total, healthy, failing, idle }
   }, [cards])
 
+  const selectedRangeLabel = useMemo(() => {
+    return probeRanges.find((r) => r.id === selectedRange)?.label ?? 'All time'
+  }, [selectedRange])
+
+  const toggleRangeMenu = useCallback(() => {
+    setRangeOpen((prev) => !prev)
+  }, [])
+
+  const selectRange = useCallback((id: ProbeRangeId) => {
+    setSelectedRange(id)
+    setRangeOpen(false)
+  }, [])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!rangeOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (rangeContainerRef.current && !rangeContainerRef.current.contains(e.target as Node)) {
+        setRangeOpen(false)
+      }
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [rangeOpen])
+
   return (
     <div className="probe-content">
       <section className="section-header probe-page__header">
-        <div>
-          <h1>Probe Timeline</h1>
-          <p className="probe-page__subtitle">
-            One chart per probe. Numeric probes render their values; non-numeric probes fall back to a status line.
-          </p>
-        </div>
+        <h1>Probe Timeline</h1>
         <div className="probe-page__header-side">
-          <div className="probe-page__meta">
-            <span className="probe-page__meta-item">
-              <Clock3 size={13} />
-              <span>
-                State {ready?.state ?? 'Unknown'} • Updated{' '}
-                {probes
-                  ? new Date(probes.generated_at * 1000).toLocaleTimeString('en-US', { hour12: false })
-                  : '—'}
-              </span>
+          {probes?.lag.detected ? (
+            <span className="probe-page__meta-item probe-page__meta-item--warning">
+              <TriangleAlert size={13} />
+              <span>Backlog: {probes.lag.probes_with_backlog.join(', ')}</span>
             </span>
-            {probes?.lag.detected ? (
-              <span className="probe-page__meta-item probe-page__meta-item--warning">
-                <TriangleAlert size={13} />
-                <span>Backlog: {probes.lag.probes_with_backlog.join(', ')}</span>
-              </span>
+          ) : null}
+          <div className="columns-control" ref={rangeContainerRef}>
+            <button className="btn" type="button" onClick={toggleRangeMenu}>
+              <span>{selectedRangeLabel}</span>
+              <ChevronDown size={12} />
+            </button>
+            {rangeOpen ? (
+              <div className="columns-menu">
+                {probeRanges.map((range) => (
+                  <button
+                    key={range.id}
+                    type="button"
+                    className={
+                      selectedRange === range.id
+                        ? 'columns-menu__option columns-menu__option--active'
+                        : 'columns-menu__option'
+                    }
+                    onClick={() => selectRange(range.id)}
+                  >
+                    {range.label}
+                  </button>
+                ))}
+              </div>
             ) : null}
           </div>
-          <button
-            className="btn btn--primary has-tooltip"
-            type="button"
-            onClick={() => void refresh()}
-            data-tooltip={refreshing ? 'Refreshing probes...' : 'Refresh probe charts'}
-          >
-            <RefreshCcw size={12} />
-            <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
-          </button>
         </div>
       </section>
 
@@ -344,98 +388,96 @@ export function ProbeChartsPanel() {
         </section>
       ) : (
         <section className="probe-chart-list">
-          {cards.map((card) => (
-            <article key={card.probeName} className="chart-card probe-chart-card">
-              <header className="chart-card__header probe-chart-card__header">
-                <div className="probe-chart-card__title-block">
-                  <div className="probe-chart-card__title-row">
-                    <h2>{card.probeName}</h2>
-                    <span className={`probe-pill ${probeStatusTone(card.latest)}`}>
-                      {probeStatusLabel(card.latest)}
-                    </span>
-                    <span className="probe-pill probe-pill--neutral">{card.chartLabel}</span>
+          {cards.map((card) => {
+            const visiblePoints = filterPointsByRange(card.points, selectedRange)
+            return (
+              <article key={card.probeName} className="chart-card probe-chart-card">
+                <header className="chart-card__header probe-chart-card__header">
+                  <div className="probe-chart-card__title-block">
+                    <div className="probe-chart-card__title-row">
+                      <h2>{card.probeName}</h2>
+                      <span className={`probe-pill ${probeStatusTone(card.latest)}`}>
+                        {probeStatusLabel(card.latest)}
+                      </span>
+                      <span className="probe-pill probe-pill--neutral">{card.chartLabel}</span>
+                    </div>
                   </div>
-                  <p className="probe-chart-card__caption">
-                    Latest update: {formatProbeTimestamp(card.latest?.ts_ms ?? null)}
-                  </p>
-                </div>
 
-                <div className="probe-chart-card__stats">
-                  <div className="probe-stat">
-                    <span className="probe-stat__label">Latest</span>
-                    <strong className="probe-stat__value">{card.latestValueLabel}</strong>
+                  <div className="probe-chart-card__stats">
+                    <div className="probe-stat">
+                      <span className="probe-stat__label">Latest</span>
+                      <strong className="probe-stat__value">{card.latestValueLabel}</strong>
+                    </div>
+                    <div className="probe-stat">
+                      <span className="probe-stat__label">Successes</span>
+                      <strong className="probe-stat__value">{numberFormatter.format(card.aggregate.successes)}</strong>
+                    </div>
+                    <div className="probe-stat">
+                      <span className="probe-stat__label">Errors</span>
+                      <strong className="probe-stat__value">{numberFormatter.format(card.aggregate.errors)}</strong>
+                    </div>
                   </div>
-                  <div className="probe-stat">
-                    <span className="probe-stat__label">Successes</span>
-                    <strong className="probe-stat__value">{numberFormatter.format(card.aggregate.successes)}</strong>
-                  </div>
-                  <div className="probe-stat">
-                    <span className="probe-stat__label">Errors</span>
-                    <strong className="probe-stat__value">{numberFormatter.format(card.aggregate.errors)}</strong>
-                  </div>
-                </div>
-              </header>
+                </header>
 
-              {card.points.length === 0 ? (
-                <p className="chart-empty">No probe events collected yet.</p>
-              ) : (
-                <div className="chart-canvas probe-chart-canvas">
-                  <ResponsiveContainer width="100%" height={260}>
-                    <LineChart data={card.points} margin={{ top: 12, right: 16, left: 4, bottom: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#dbe4ec" />
-                      <XAxis dataKey="time" minTickGap={24} stroke="#64748b" />
-                      <YAxis
-                        stroke="#64748b"
-                        domain={card.chartMode === 'value' ? ['auto', 'auto'] : [0, 1]}
-                        ticks={card.chartMode === 'value' ? undefined : [0, 1]}
-                        tickFormatter={(value: number) => {
-                          if (card.chartMode === 'value') {
-                            return compactNumberFormatter.format(value)
-                          }
-                          return value === 1 ? 'OK' : 'ERR'
-                        }}
-                        width={56}
-                      />
-                      <Tooltip
-                        formatter={(_value, _name, item) => {
-                          const payload = item.payload as ProbeChartPoint
-                          if (card.chartMode === 'status') {
-                            return [payload.statusLabel, 'Status']
-                          }
-                          return [payload.rawValueLabel, 'Value']
-                        }}
-                        labelFormatter={(_label, items) => {
-                          const payload = items[0]?.payload as ProbeChartPoint | undefined
-                          if (!payload) {
-                            return '—'
-                          }
-                          const elapsed = payload.elapsedMs === null ? '—' : `${payload.elapsedMs.toFixed(2)} ms`
-                          return `${formatProbeTimestamp(payload.tsMs)} | ${elapsed}`
-                        }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="value"
-                        stroke={card.latest?.status === false ? '#ef4444' : '#0891b2'}
-                        strokeWidth={2.5}
-                        dot={false}
-                        isAnimationActive={false}
-                        connectNulls
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
+                {visiblePoints.length === 0 ? (
+                  <p className="chart-empty">No probe events in selected range.</p>
+                ) : (
+                  <div className="chart-canvas probe-chart-canvas">
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart data={visiblePoints} margin={{ top: 12, right: 16, left: 4, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#dbe4ec" />
+                        <XAxis dataKey="time" minTickGap={24} stroke="#64748b" />
+                        <YAxis
+                          stroke="#64748b"
+                          domain={card.chartMode === 'value' ? ['auto', 'auto'] : [0, 1]}
+                          ticks={card.chartMode === 'value' ? undefined : [0, 1]}
+                          tickFormatter={(value: number) => {
+                            if (card.chartMode === 'value') {
+                              return compactNumberFormatter.format(value)
+                            }
+                            return value === 1 ? 'OK' : 'ERR'
+                          }}
+                          width={56}
+                        />
+                        <Tooltip
+                          formatter={(_value, _name, item) => {
+                            const payload = item.payload as ProbeChartPoint
+                            if (card.chartMode === 'status') {
+                              return [payload.statusLabel, 'Status']
+                            }
+                            return [payload.rawValueLabel, 'Value']
+                          }}
+                          labelFormatter={(_label, items) => {
+                            const payload = items[0]?.payload as ProbeChartPoint | undefined
+                            if (!payload) {
+                              return '—'
+                            }
+                            const elapsed = payload.elapsedMs === null ? '—' : `${payload.elapsedMs.toFixed(2)} ms`
+                            return `${formatProbeTimestamp(payload.tsMs)} | ${elapsed}`
+                          }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="value"
+                          stroke={card.latest?.status === false ? '#ef4444' : '#0891b2'}
+                          strokeWidth={2.5}
+                          dot={false}
+                          isAnimationActive={false}
+                          connectNulls
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
 
-              {card.latest?.error_message ? (
-                <footer className="probe-chart-card__footer probe-chart-card__footer--error">
-                  <strong>{card.latest.error_type ?? 'ProbeError'}:</strong> {card.latest.error_message}
-                </footer>
-              ) : (
-                <footer className="probe-chart-card__footer">Window: {card.aggregate.window_s}s</footer>
-              )}
-            </article>
-          ))}
+                {card.latest?.error_message ? (
+                  <footer className="probe-chart-card__footer probe-chart-card__footer--error">
+                    <strong>{card.latest.error_type ?? 'ProbeError'}:</strong> {card.latest.error_message}
+                  </footer>
+                ) : null}
+              </article>
+            )
+          })}
         </section>
       )}
     </div>

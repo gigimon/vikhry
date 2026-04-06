@@ -107,6 +107,16 @@ export async function fetchResources(): Promise<ResourcesResponse> {
   return requestJson<ResourcesResponse>('/resources')
 }
 
+export interface ResourceItemsResponse {
+  resource_name: string
+  total: number
+  items: Array<Record<string, unknown>>
+}
+
+export async function fetchResourceItems(resourceName: string): Promise<ResourceItemsResponse> {
+  return requestJson<ResourceItemsResponse>(`/resources/${encodeURIComponent(resourceName)}/items`)
+}
+
 export async function fetchScenarioOnInitSpec(): Promise<ScenarioOnInitSpec> {
   return requestJson<ScenarioOnInitSpec>('/scenario/on_init_params')
 }

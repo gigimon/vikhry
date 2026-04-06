@@ -1,6 +1,7 @@
 """Runtime DSL primitives for vikhry scenarios."""
 
 from vikhry.runtime.dsl import (
+    ProbeContext,
     ProbeSpec,
     VU,
     between,
@@ -25,6 +26,7 @@ from vikhry.runtime.strategy import (
 __all__ = [
     "VU",
     "ParallelReadyStrategy",
+    "ProbeContext",
     "ProbeSpec",
     "JsonRPCClient",
     "ReqwestClient",

@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
-from vikhry.runtime import ProbeSpec, VU, collect_probe_specs, resolve_every_delay
+from vikhry.runtime import ProbeContext, ProbeSpec, VU, collect_probe_specs, resolve_every_delay
 from vikhry.runtime.metrics import exception_fields
 from vikhry.worker.models.state import WorkerPhase, WorkerRuntimeState
 from vikhry.worker.redis_repo.state_repo import WorkerStateRepository
@@ -23,7 +23,8 @@ ProbeValue: TypeAlias = str | int | float | bool | None
 @dataclass(slots=True, frozen=True)
 class LoadedProbe:
     spec: ProbeSpec
-    call: Callable[[], Awaitable[Any]]
+    call: Callable[..., Awaitable[Any]]
+    accepts_ctx: bool = False
 
 
 class WorkerProbePublisher:
@@ -174,11 +175,17 @@ class WorkerProbeRuntime:
             error_message=error_message,
         )
 
+    def _build_probe_context(self) -> ProbeContext:
+        return ProbeContext(init_params=dict(self._runtime_state.init_params))
+
     async def _call_probe(self, probe: LoadedProbe) -> Any:
+        args: tuple[Any, ...] = ()
+        if probe.accepts_ctx:
+            args = (self._build_probe_context(),)
         if probe.spec.timeout is None:
-            return await probe.call()
+            return await probe.call(*args)
         async with asyncio.timeout(probe.spec.timeout):
-            return await probe.call()
+            return await probe.call(*args)
 
     async def _sleep_or_stop(self, delay_s: float) -> bool:
         if delay_s <= 0:
@@ -198,8 +205,24 @@ def load_probe_targets(import_path: str) -> tuple[LoadedProbe, ...]:
         target = getattr(module, spec.function_name, None)
         if not inspect.iscoroutinefunction(target):
             raise TypeError(f"probe target `{spec.function_name}` must be an async function")
-        probes.append(LoadedProbe(spec=spec, call=target))
+        accepts_ctx = _probe_accepts_ctx(target)
+        probes.append(LoadedProbe(spec=spec, call=target, accepts_ctx=accepts_ctx))
     return tuple(probes)
+
+
+def _probe_accepts_ctx(func: Callable[..., Any]) -> bool:
+    try:
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        if not params:
+            return False
+        first = params[0]
+        return first.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    except (ValueError, TypeError):
+        return False
 
 
 def _load_scenario_module_and_vu_type(import_path: str) -> tuple[Any, type[VU]]:

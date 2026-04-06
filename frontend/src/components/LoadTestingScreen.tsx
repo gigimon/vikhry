@@ -35,6 +35,7 @@ import {
 } from '../api/dashboardApi'
 import { ProbeChartsPanel } from './ProbeChartsScreen'
 import { ResourceCreateModal } from './ResourceCreateModal'
+import { ResourceViewModal } from './ResourceViewModal'
 import type {
   MetricsHistoryResponse,
   MetricsResponse,
@@ -721,6 +722,39 @@ function useDashboardData(metricsEventsCount: number) {
   }
 }
 
+function TracebackBlock({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const ref = useRef<HTMLPreElement>(null)
+  const [overflows, setOverflows] = useState(false)
+
+  useEffect(() => {
+    const el = ref.current
+    if (el) setOverflows(el.scrollHeight > el.clientHeight + 2)
+  }, [content])
+
+  return (
+    <div>
+      <pre
+        ref={ref}
+        className={
+          'errors-traceback-content' + (expanded ? ' errors-traceback-content--expanded' : '')
+        }
+      >
+        {content}
+      </pre>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          className="errors-traceback-toggle"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Collapse' : 'Expand'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function LoadTestingScreen() {
   const [activeTab, setActiveTab] = useState<TabId>('statistics')
   const [statsScope, setStatsScope] = useState<StatsScope>('total')
@@ -733,6 +767,8 @@ export function LoadTestingScreen() {
   const [startModalOpen, setStartModalOpen] = useState(false)
   const [changeUsersModalOpen, setChangeUsersModalOpen] = useState(false)
   const [resourceModalOpen, setResourceModalOpen] = useState(false)
+  const [resourceViewModalOpen, setResourceViewModalOpen] = useState(false)
+  const [resourceViewName, setResourceViewName] = useState('')
 
   const [stopping, setStopping] = useState(false)
   const [starting, setStarting] = useState(false)
@@ -2234,11 +2270,13 @@ export function LoadTestingScreen() {
                         </td>
                         <td className="errors-traceback-cell">
                           {row.errorType || row.errorMessage ? (
-                            <p className="errors-traceback-meta">
+                            <p className="errors-traceback-meta" title={[row.errorType, row.errorMessage].filter(Boolean).join(': ')}>
                               {[row.errorType, row.errorMessage].filter(Boolean).join(': ')}
                             </p>
                           ) : null}
-                          <pre className="errors-traceback-content">{row.traceback}</pre>
+                          {row.traceback ? (
+                            <TracebackBlock content={row.traceback} />
+                          ) : null}
                         </td>
                       </tr>
                     ))
@@ -2277,6 +2315,16 @@ export function LoadTestingScreen() {
                         <td>{resource.resource_name}</td>
                         <td>{numberFormatter.format(resource.count)}</td>
                         <td>
+                          <button
+                            className="btn btn--ghost table-action-btn"
+                            type="button"
+                            onClick={() => {
+                              setResourceViewName(resource.resource_name)
+                              setResourceViewModalOpen(true)
+                            }}
+                          >
+                            View
+                          </button>
                           <button
                             className="btn btn--ghost table-action-btn"
                             type="button"
@@ -2906,6 +2954,12 @@ export function LoadTestingScreen() {
         onResourceChange={setResourceNameInput}
         onCountChange={setResourceCountInput}
         onCreate={onCreateResource}
+      />
+
+      <ResourceViewModal
+        open={resourceViewModalOpen}
+        resourceName={resourceViewName}
+        onClose={() => setResourceViewModalOpen(false)}
       />
     </div>
   )

@@ -42,6 +42,16 @@ class ProbeSpec:
 
 
 @dataclass(slots=True)
+class ProbeContext:
+    """Context object passed to @probe functions, carries init_params from start_test."""
+
+    init_params: dict[str, Any]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.init_params.get(key, default)
+
+
+@dataclass(slots=True)
 class BoundStep:
     spec: StepSpec
     call: Callable[[], Awaitable[Any]]

@@ -258,6 +258,23 @@ def register_routes(
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)
 
+    @app.get("/resources/:resource_name/items")
+    async def resource_items(request: Request) -> dict[str, object] | Response:
+        try:
+            resource_name = request.path_params.get("resource_name", "")
+            if not resource_name:
+                return _json_error_response("resource_name is required", status_code=400)
+            counters = await state_repo.list_resource_counters()
+            total = counters.get(resource_name, 0)
+            items = await state_repo.list_resource_items(resource_name, total)
+            return {
+                "resource_name": resource_name,
+                "total": total,
+                "items": items,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return _exception_to_response(exc)
+
     @app.websocket("/ws/metrics")
     async def metrics_ws(websocket) -> None:
         subscriber_id, queue = await metrics_service.subscribe()

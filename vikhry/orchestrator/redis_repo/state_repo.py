@@ -259,6 +259,25 @@ class TestStateRepository:
             raise TypeError("Resource payload must be JSON object")
         return parsed
 
+    async def list_resource_items(
+        self, resource_name: str, total: int
+    ) -> list[dict[str, Any]]:
+        if total <= 0:
+            return []
+        pipeline = self._redis.pipeline()
+        for resource_id in range(1, total + 1):
+            pipeline.get(self.resource_key(resource_name, resource_id))
+        results = await pipeline.execute()
+        items: list[dict[str, Any]] = []
+        for resource_id, raw in enumerate(results, start=1):
+            if raw is None:
+                continue
+            parsed = orjson.loads(raw)
+            if isinstance(parsed, dict):
+                parsed.setdefault("resource_id", str(resource_id))
+                items.append(parsed)
+        return items
+
     async def register_metric(self, metric_id: str) -> None:
         await self._redis.sadd("metrics", metric_id)
 
