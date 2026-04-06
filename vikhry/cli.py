@@ -742,6 +742,7 @@ def _start_worker_detached(
 ) -> int:
     command = [
         sys.executable,
+        "-u",
         "-m",
         "vikhry.cli",
         "worker",

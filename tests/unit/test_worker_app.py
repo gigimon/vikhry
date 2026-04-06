@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 
 import pytest
 
-from vikhry.worker.app import _wait_for_redis_or_retry
+from vikhry.worker.app import _configure_logging, _wait_for_redis_or_retry
 
 
 class _FakeRedisClient:
@@ -80,3 +81,27 @@ async def test_worker_wait_for_redis_or_retry_stops_when_shutdown_requested_spec
 
     assert connected is False
     assert client.ping_calls == 1
+
+
+def test_configure_logging_replaces_preexisting_root_handlers_spec() -> None:
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    sentinel_handler = logging.NullHandler()
+
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.addHandler(sentinel_handler)
+    root.setLevel(logging.NOTSET)
+
+    try:
+        _configure_logging("WARNING")
+        assert sentinel_handler not in root.handlers
+        assert root.level == logging.WARNING
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            handler.close()
+        for handler in original_handlers:
+            root.addHandler(handler)
+        root.setLevel(original_level)

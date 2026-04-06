@@ -122,9 +122,6 @@ def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
 
 
 def _configure_logging(log_level: str) -> None:
-    root = logging.getLogger()
-    if root.handlers:
-        return
     normalized_level = str(log_level).strip().upper() or "INFO"
     resolved_level = getattr(logging, normalized_level, None)
     invalid_level = not isinstance(resolved_level, int)
@@ -133,6 +130,7 @@ def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=resolved_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
     if invalid_level:
         logger.warning("unknown log level `%s`, falling back to INFO", log_level)

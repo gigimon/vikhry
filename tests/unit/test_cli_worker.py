@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from vikhry.cli import _start_worker_detached
@@ -31,6 +32,7 @@ def test_start_worker_detached_threads_run_probes_flag_spec(
     assert pid == 321
     command = captured["command"]
     assert isinstance(command, list)
+    assert command[:3] == [sys.executable, "-u", "-m"]
     assert "--run-probes" in command
 
 
