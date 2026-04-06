@@ -5,6 +5,7 @@ import pytest
 from vikhry.runtime.metrics import (
     build_metric_payload,
     emit_metric,
+    exception_fields,
     metric,
     metric_scope,
     normalize_result_code,
@@ -34,6 +35,25 @@ def test_build_metric_payload_contains_required_fields_spec() -> None:
     assert payload["result_category"] == "ok"
     assert payload["fatal"] is False
     assert payload["method"] == "GET"
+
+
+def test_build_metric_payload_includes_traceback_spec() -> None:
+    payload = build_metric_payload(
+        name="/page1",
+        step="open_page",
+        status=False,
+        time=12.3,
+        source="http",
+        stage="execute",
+        result_code="HTTP_EXCEPTION",
+        result_category="exception",
+        fatal=False,
+        error_type="RuntimeError",
+        error_message="boom",
+        traceback='Traceback (most recent call last):\n  File "x.py", line 1, in <module>\nRuntimeError: boom',
+    )
+    assert payload["traceback"].startswith("Traceback (most recent call last):")
+    assert payload["traceback"].endswith("RuntimeError: boom")
 
 
 @pytest.mark.asyncio
@@ -122,3 +142,15 @@ def test_normalize_result_code_sanitizes_and_caps_length_spec() -> None:
 
 def test_normalize_result_code_returns_unknown_when_empty_spec() -> None:
     assert normalize_result_code("") == "UNKNOWN"
+
+
+def test_exception_fields_include_traceback_spec() -> None:
+    try:
+        raise KeyError("keypair")
+    except KeyError as exc:
+        payload = exception_fields(exc)
+
+    assert payload["error_type"] == "KeyError"
+    assert "keypair" in payload["error_message"]
+    assert "Traceback (most recent call last):" in payload["traceback"]
+    assert "KeyError" in payload["traceback"]

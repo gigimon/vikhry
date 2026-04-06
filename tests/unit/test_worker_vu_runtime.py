@@ -215,6 +215,7 @@ async def test_runtime_runs_steps_emits_metrics_and_calls_hooks_spec() -> None:
     assert first_event["fatal"] is False
     assert "time" in first_event
     assert "error_message" not in first_event
+    assert "traceback" not in first_event
 
 
 def test_load_vu_type_resolves_valid_path_spec() -> None:
@@ -320,6 +321,7 @@ async def test_runtime_ignores_step_result_status_like_field_spec(
     assert first_event["status"] is True
     assert first_event["result_code"] == "STEP_OK"
     assert "error_message" not in first_event
+    assert "traceback" not in first_event
     assert not any("returned error status" in record.getMessage() for record in caplog.records)
 
 
@@ -343,6 +345,12 @@ async def test_runtime_logs_error_for_step_exception_spec(caplog: pytest.LogCapt
     assert any(
         event["result_code"] == "STEP_EXCEPTION" and event["status"] is False
         for _, event in repo.metric_events
+    )
+    assert any(
+        "Traceback (most recent call last):" in str(event.get("traceback"))
+        and "RuntimeError" in str(event.get("traceback"))
+        for _, event in repo.metric_events
+        if event["result_code"] == "STEP_EXCEPTION"
     )
 
 
@@ -369,6 +377,8 @@ async def test_runtime_does_not_run_steps_when_on_init_fails_spec() -> None:
     assert event["result_code"] == "LIFECYCLE_EXCEPTION"
     assert event["result_category"] == "exception"
     assert event["fatal"] is True
+    assert "Traceback (most recent call last):" in str(event["traceback"])
+    assert "RuntimeError: init boom" in str(event["traceback"])
     assert repo.active_users == set()
 
 
@@ -395,6 +405,8 @@ async def test_runtime_does_not_run_steps_when_on_start_fails_spec() -> None:
     assert event["result_code"] == "LIFECYCLE_EXCEPTION"
     assert event["result_category"] == "exception"
     assert event["fatal"] is True
+    assert "Traceback (most recent call last):" in str(event["traceback"])
+    assert "RuntimeError: start boom" in str(event["traceback"])
     assert repo.active_users == set()
 
 

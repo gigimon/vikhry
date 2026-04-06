@@ -204,6 +204,7 @@ class InstrumentedHTTPClient:
         result_category = "transport_error"
         error_type: str | None = None
         error_message: str | None = None
+        traceback: str | None = None
         cancelled = False
 
         try:
@@ -224,6 +225,7 @@ class InstrumentedHTTPClient:
             error_payload = exception_fields(exc)
             error_type = error_payload["error_type"]
             error_message = error_payload["error_message"]
+            traceback = error_payload["traceback"]
             if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
                 result_code = "HTTP_TIMEOUT"
                 result_category = "timeout"
@@ -249,6 +251,7 @@ class InstrumentedHTTPClient:
                         fatal=False,
                         error_type=error_type,
                         error_message=error_message,
+                        traceback=traceback,
                         **metric_fields,
                     )
                 except Exception:  # noqa: BLE001
@@ -293,6 +296,7 @@ class InstrumentedJsonRPCClient:
         result_category = "transport_error"
         error_type: str | None = None
         error_message: str | None = None
+        traceback: str | None = None
         http_status: int | None = None
         rpc_error_code: int | str | None = None
         cancelled = False
@@ -311,6 +315,7 @@ class InstrumentedJsonRPCClient:
             http_status = exc.http_status
             error_type = type(exc).__name__
             error_message = exc.message
+            traceback = exception_fields(exc)["traceback"]
             result_code = _jsonrpc_result_code_from_error_code(exc.code)
             result_category = "rpc_error"
             raise
@@ -318,6 +323,7 @@ class InstrumentedJsonRPCClient:
             error_payload = exception_fields(exc)
             error_type = error_payload["error_type"]
             error_message = error_payload["error_message"]
+            traceback = error_payload["traceback"]
             result_code = "JSONRPC_PROTOCOL_ERROR"
             result_category = "protocol_error"
             raise
@@ -325,6 +331,7 @@ class InstrumentedJsonRPCClient:
             error_payload = exception_fields(exc)
             error_type = error_payload["error_type"]
             error_message = error_payload["error_message"]
+            traceback = error_payload["traceback"]
             if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
                 result_code = "JSONRPC_TIMEOUT"
                 result_category = "timeout"
@@ -354,6 +361,7 @@ class InstrumentedJsonRPCClient:
                         fatal=False,
                         error_type=error_type,
                         error_message=error_message,
+                        traceback=traceback,
                         **metric_fields,
                     )
                 except Exception:  # noqa: BLE001

@@ -512,12 +512,7 @@ def infra_up(
         raise
 
     typer.echo(
-        "Infra started.\n"
-        f"UI: {DEFAULT_ORCHESTRATOR_URL}/\n"
-        f"API: {DEFAULT_ORCHESTRATOR_URL}\n"
-        f"Redis container: {DEFAULT_INFRA_REDIS_CONTAINER_NAME}\n"
-        f"Workers: {worker_count}\n"
-        f"Runtime dir: {DEFAULT_INFRA_DIR}"
+        _format_infra_up_summary(worker_count)
     )
 
 
@@ -1230,6 +1225,26 @@ def _tail_file(path: Path, max_lines: int = 20) -> str:
     if not lines:
         return ""
     return "\n".join(lines[-max_lines:])
+
+
+def _format_infra_up_summary(worker_count: int) -> str:
+    log_lines = [
+        f"- orchestrator: {DEFAULT_INFRA_ORCHESTRATOR_LOG_FILE}",
+    ]
+    for index in range(1, worker_count + 1):
+        log_lines.append(f"- worker-{index}: {_infra_worker_log_file(index)}")
+
+    return (
+        "Infra started.\n"
+        f"UI: {DEFAULT_ORCHESTRATOR_URL}/\n"
+        f"API: {DEFAULT_ORCHESTRATOR_URL}\n"
+        f"Redis container: {DEFAULT_INFRA_REDIS_CONTAINER_NAME}\n"
+        f"Workers: {worker_count}\n"
+        f"Runtime dir: {DEFAULT_INFRA_DIR}\n"
+        "Logs:\n"
+        f"{'\n'.join(log_lines)}\n"
+        "Tip: use `tail -f <log-file>` to watch a process log."
+    )
 
 
 def _resolve_worker_id(worker_id: str | None) -> str:

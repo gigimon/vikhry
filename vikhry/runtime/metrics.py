@@ -5,6 +5,7 @@ import inspect
 import logging
 import re
 import time
+import traceback as traceback_module
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -85,6 +86,7 @@ async def emit_metric(
     step: str | None = None,
     error_type: str | None = None,
     error_message: str | None = None,
+    traceback: str | None = None,
     **fields: Any,
 ) -> bool:
     emitter = _metric_emitter_var.get()
@@ -103,6 +105,7 @@ async def emit_metric(
         fatal=fatal,
         error_type=error_type,
         error_message=error_message,
+        traceback=traceback,
         **fields,
     )
     await emitter(payload)
@@ -144,6 +147,7 @@ def metric(
                     fatal=fatal,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
+                    traceback=_format_traceback(exc),
                     fields=fields,
                 )
                 raise
@@ -179,6 +183,7 @@ def build_metric_payload(
     fatal: bool,
     error_type: str | None = None,
     error_message: str | None = None,
+    traceback: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
     for required_field in _REQUIRED_FIELDS:
@@ -211,6 +216,8 @@ def build_metric_payload(
         payload["error_type"] = _normalize_error_type(error_type)
     if error_message is not None:
         payload["error_message"] = _normalize_error_message(error_message)
+    if traceback is not None:
+        payload["traceback"] = _normalize_traceback(traceback)
     payload.update(fields)
     return payload
 
@@ -241,6 +248,7 @@ async def _safe_emit(
     fatal: bool,
     error_type: str | None = None,
     error_message: str | None = None,
+    traceback: str | None = None,
     fields: dict[str, Any],
 ) -> None:
     try:
@@ -255,6 +263,7 @@ async def _safe_emit(
             fatal=fatal,
             error_type=error_type,
             error_message=error_message,
+            traceback=traceback,
             **fields,
         )
     except Exception:  # noqa: BLE001
@@ -333,8 +342,22 @@ def _normalize_error_message(value: object) -> str:
     return normalized[:_MAX_ERROR_MESSAGE_LENGTH]
 
 
+def _normalize_traceback(value: object) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    return normalized
+
+
 def exception_fields(exc: BaseException) -> dict[str, str]:
     return {
         "error_type": type(exc).__name__,
         "error_message": _normalize_error_message(str(exc)),
+        "traceback": _format_traceback(exc),
     }
+
+
+def _format_traceback(exc: BaseException) -> str:
+    return _normalize_traceback(
+        "".join(traceback_module.format_exception(type(exc), exc, exc.__traceback__))
+    )

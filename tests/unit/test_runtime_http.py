@@ -104,6 +104,8 @@ async def test_http_client_emits_failed_metric_on_exception_spec() -> None:
     assert captured[0]["method"] == "POST"
     assert captured[0]["error_type"] == "RuntimeError"
     assert captured[0]["error_message"] == "boom"
+    assert "Traceback (most recent call last):" in str(captured[0]["traceback"])
+    assert "RuntimeError: boom" in str(captured[0]["traceback"])
 
 
 @pytest.mark.asyncio

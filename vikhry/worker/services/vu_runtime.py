@@ -158,6 +158,7 @@ class WorkerVURuntime:
         started_at = time.perf_counter()
         error_type: str | None = None
         error_message: str | None = None
+        traceback: str | None = None
         success = False
         cancelled = False
 
@@ -177,6 +178,7 @@ class WorkerVURuntime:
                 error_payload = exception_fields(exc)
                 error_type = error_payload["error_type"]
                 error_message = error_payload["error_message"]
+                traceback = error_payload["traceback"]
                 logger.exception(
                     "VU step raised exception (worker_id=%s, user_id=%s, step=%s)",
                     self._worker_id,
@@ -211,6 +213,7 @@ class WorkerVURuntime:
                         fatal=False,
                         error_type=error_type,
                         error_message=error_message,
+                        traceback=traceback,
                     )
 
     async def _emit_lifecycle_failure(self, *, stage: str, error: Exception) -> None:
@@ -232,6 +235,7 @@ class WorkerVURuntime:
             fatal=True,
             error_type=payload["error_type"],
             error_message=payload["error_message"],
+            traceback=payload["traceback"],
         )
 
 
