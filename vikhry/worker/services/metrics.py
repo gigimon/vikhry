@@ -58,4 +58,9 @@ class WorkerMetricsPublisher:
         step = str(metric.get("step", ""))
         if step and step != "__unknown__":
             return f"{step}/{name}"
+
+        stage = str(metric.get("stage", ""))
+        if stage in ("on_init", "on_start", "on_stop"):
+            return f"Setup/{name}"
+
         return name

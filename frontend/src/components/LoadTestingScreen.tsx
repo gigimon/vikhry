@@ -370,7 +370,27 @@ function toStatsRows(
     if (stepRowsByName.has(stepName)) {
       continue
     }
-    topLevelRows.push(...childRows)
+    // Create a synthetic step row that aggregates all children
+    const syntheticRow: RowWithMeta = {
+      metricId: stepName,
+      name: stepName,
+      success: childRows.reduce((s, r) => s + r.success, 0),
+      failure: childRows.reduce((s, r) => s + r.failure, 0),
+      medianMs: null,
+      p95Ms: null,
+      p99Ms: null,
+      averageMs: null,
+      rps: childRows.reduce((s, r) => s + r.rps, 0),
+      failureRate: 0,
+      kind: 'synthetic',
+      stepName,
+      isStepMetric: true,
+      isNested: false,
+    }
+    const total = syntheticRow.success + syntheticRow.failure
+    syntheticRow.failureRate = total > 0 ? syntheticRow.failure / total : 0
+    stepRowsByName.set(stepName, syntheticRow)
+    topLevelRows.push(syntheticRow)
   }
 
   topLevelRows.sort(metricSortByName)
