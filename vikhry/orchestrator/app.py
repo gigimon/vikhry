@@ -15,6 +15,7 @@ from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
 from vikhry.orchestrator.scenario_loader import (
     load_on_init_spec_from_scenario,
     load_probe_names_from_scenario,
+    load_resource_factories_from_scenario,
     load_resource_names_from_scenario,
 )
 from vikhry.orchestrator.services.lifecycle_service import LifecycleService
@@ -48,6 +49,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
     ALLOW_CORS(app, origins="*", headers="*")
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     state_repo = TestStateRepository(redis_client)
+    scenario_resource_factories = load_resource_factories_from_scenario(settings.scenario)
     scenario_resource_names = load_resource_names_from_scenario(settings.scenario)
     scenario_probe_names = load_probe_names_from_scenario(settings.scenario)
     scenario_on_init_spec = load_on_init_spec_from_scenario(settings.scenario)
@@ -67,6 +69,7 @@ def build_app(settings: OrchestratorSettings) -> tuple[Robyn, OrchestratorRuntim
         state_repo=state_repo,
         scenario_resource_names=scenario_resource_names,
         default_prepare_counts={},
+        resource_factories=scenario_resource_factories,
     )
     probe_service = ProbeService(
         state_repo=state_repo,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,32 @@ from vikhry.runtime import VU, collect_probe_specs, collect_resource_factories
 
 class ScenarioLoadError(RuntimeError):
     pass
+
+
+def load_resource_factories_from_scenario(
+    scenario_path: str | Path | None,
+) -> dict[str, Callable[..., Awaitable[Any]]]:
+    """Return mapping of resource_name -> async factory callable from scenario."""
+    if not scenario_path:
+        return {}
+
+    scenario_ref = str(scenario_path).strip()
+    if not _is_existing_file_path(scenario_ref) and _looks_like_import_path(scenario_ref):
+        module, _vu_type = _load_module_and_vu_type(scenario_ref)
+        return collect_resource_factories(module.__dict__)
+
+    # File-path scenarios: import the module to get live factory callables.
+    path = Path(scenario_ref).expanduser().resolve()
+    if not path.exists():
+        raise ScenarioLoadError(f"Scenario file not found: {path}")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_vikhry_scenario_tmp", path)
+    if spec is None or spec.loader is None:
+        raise ScenarioLoadError(f"Cannot load scenario module from: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return collect_resource_factories(module.__dict__)
 
 
 def load_resource_names_from_scenario(scenario_path: str | Path | None) -> list[str]:

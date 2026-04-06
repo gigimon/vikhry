@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vikhry.orchestrator.models.resource import (
@@ -19,10 +20,12 @@ class ResourceService:
         state_repo: TestStateRepository,
         scenario_resource_names: list[str] | None = None,
         default_prepare_counts: dict[str, int] | None = None,
+        resource_factories: dict[str, Callable[..., Awaitable[Any]]] | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._scenario_resource_names = sorted(set(scenario_resource_names or []))
         self._default_prepare_counts = default_prepare_counts or {}
+        self._resource_factories = resource_factories or {}
 
     async def prepare_for_start(self, target_users: int) -> dict[str, Any]:
         logger.info(
@@ -103,14 +106,35 @@ class ResourceService:
         payload = payload or {}
         resource_ids: list[str] = []
         created_at = self._now_ts()
+        factory = self._resource_factories.get(resource_name)
 
         for _ in range(count):
             next_id = await self._state_repo.increment_resource_counter(resource_name, delta=1)
             resource_id = str(next_id)
+
+            factory_fields: dict[str, Any] = {}
+            if factory is not None:
+                try:
+                    factory_fields = await factory(resource_id, None)
+                    if not isinstance(factory_fields, dict):
+                        logger.warning(
+                            "resource factory for %s returned non-dict (%s), ignoring",
+                            resource_name,
+                            type(factory_fields).__name__,
+                        )
+                        factory_fields = {}
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "resource factory for %s raised on resource_id=%s",
+                        resource_name,
+                        resource_id,
+                    )
+
             await self._state_repo.set_resource_data(
                 resource_name=resource_name,
                 resource_id=resource_id,
                 payload={
+                    **factory_fields,
                     **payload,
                     "resource_name": resource_name,
                     "resource_id": resource_id,
