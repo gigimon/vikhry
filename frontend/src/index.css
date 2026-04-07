@@ -393,6 +393,10 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.table-card tbody tr:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+
 .table-card th {
   color: #94a3b8;
   text-transform: uppercase;
