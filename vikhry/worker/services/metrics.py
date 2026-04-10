@@ -52,8 +52,11 @@ class WorkerMetricsPublisher:
         name = raw_name.strip()
 
         source = str(metric.get("source", ""))
-        if source in ("step", "lifecycle"):
+        if source == "step":
             return name
+
+        if source == "lifecycle":
+            return f"Setup/{name}"
 
         step = str(metric.get("step", ""))
         if step and step != "__unknown__":

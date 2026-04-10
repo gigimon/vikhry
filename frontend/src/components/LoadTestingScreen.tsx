@@ -1,6 +1,7 @@
 import {
   Activity,
   ChevronDown,
+  Clock3,
   Columns3,
   Gauge,
   Layers,
@@ -170,6 +171,29 @@ function formatMaybeNumber(value: number | null, fractionDigits = 0): string {
     return '—'
   }
   return value.toFixed(fractionDigits)
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
+  const s = totalSeconds % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
+}
+
+function failureRateStyle(rate: number): React.CSSProperties | undefined {
+  if (rate <= 0) return undefined
+  // 10% steps: 0.1 → lightest red, 1.0 → strongest red
+  const pct = Math.min(rate, 1)
+  const step = Math.ceil(pct * 10) // 1..10
+  const lightness = 97 - step * 5  // 92, 87, 82, ... 47
+  const saturation = 50 + step * 5  // 55, 60, 65, ... 100
+  return {
+    color: `hsl(0, ${saturation}%, ${Math.max(lightness - 20, 20)}%)`,
+    background: `hsl(0, ${saturation}%, ${lightness}%)`,
+    fontWeight: step >= 3 ? 700 : undefined,
+    borderRadius: '4px',
+  }
 }
 
 function statusLabel(state: ReadyResponse['state'] | undefined): string {
@@ -397,16 +421,11 @@ function toStatsRows(
 
   const output: StatsRow[] = []
   for (const row of topLevelRows) {
-    output.push({ ...row, isNested: false })
-
-    if (!row.isStepMetric) {
-      continue
-    }
-
-    const children = [...(httpRowsByStep.get(row.metricId) ?? [])]
+    const children = row.isStepMetric ? [...(httpRowsByStep.get(row.metricId) ?? [])] : []
     children.sort(metricSortByName)
+    output.push({ ...row, isNested: false, hasChildren: children.length > 0 })
     for (const child of children) {
-      output.push({ ...child, isNested: true })
+      output.push({ ...child, isNested: true, parentName: row.name })
     }
   }
 
@@ -789,6 +808,7 @@ export function LoadTestingScreen() {
   const [selectedSources, setSelectedSources] = useState<string[]>([])
   const [visibleColumns, setVisibleColumns] = useState<StatsColumnId[]>(defaultVisibleColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const [errorsCategoryOpen, setErrorsCategoryOpen] = useState(false)
 
@@ -855,6 +875,32 @@ export function LoadTestingScreen() {
     error,
     refresh,
   } = useDashboardData(metricsEventsCount)
+
+  const testStartedAtRef = useRef<number | null>(null)
+  const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (ready?.state === 'RUNNING') {
+      if (testStartedAtRef.current === null) {
+        testStartedAtRef.current = Date.now()
+      }
+    } else {
+      testStartedAtRef.current = null
+      setElapsedSeconds(null)
+    }
+  }, [ready?.state])
+
+  useEffect(() => {
+    if (testStartedAtRef.current === null) return
+    const tick = () => {
+      if (testStartedAtRef.current !== null) {
+        setElapsedSeconds(Math.floor((Date.now() - testStartedAtRef.current) / 1000))
+      }
+    }
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [ready?.state])
 
   const dismissNotification = useCallback((id: number) => {
     const timerId = notificationTimersRef.current.get(id)
@@ -1296,19 +1342,19 @@ export function LoadTestingScreen() {
     () => (resources?.resources ?? []).map((resource) => resource.resource_name),
     [resources],
   )
+  const resourceCounts = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const r of resources?.resources ?? []) {
+      map[r.resource_name] = r.count
+    }
+    return map
+  }, [resources])
   const selectedResourceName = useMemo(() => {
     if (resourceNames.includes(resourceNameInput)) {
       return resourceNameInput
     }
     return resourceNames[0] ?? ''
   }, [resourceNameInput, resourceNames])
-  const existingResourcesLabel = useMemo(() => {
-    if (!resources || resources.resources.length === 0) {
-      return null
-    }
-    return resources.resources.map((resource) => resource.resource_name).join(', ')
-  }, [resources])
-
   const openChangeUsersModal = useCallback(() => {
     setChangeUsersInput(String(totalUsers))
     setChangeUsersModalOpen(true)
@@ -1925,6 +1971,12 @@ export function LoadTestingScreen() {
             <Activity size={12} />
             <span>{compactNumberFormatter.format(totalRps)} RPS</span>
           </div>
+          {elapsedSeconds !== null ? (
+            <div className="pill has-tooltip" data-tooltip="Test duration">
+              <Clock3 size={12} />
+              <span>{formatElapsed(elapsedSeconds)}</span>
+            </div>
+          ) : null}
         </div>
 
         <div className="topbar__actions">
@@ -2066,10 +2118,29 @@ export function LoadTestingScreen() {
                       </td>
                     </tr>
                   ) : (
-                    rows.map((row) => (
-                      <tr key={row.name}>
+                    rows
+                      .filter((row) => !row.isNested || !row.parentName || !collapsedGroups.has(row.parentName))
+                      .map((row) => (
+                      <tr key={row.isNested ? `${row.parentName}/${row.name}` : row.name}>
                         {visibleColumns.includes('name') ? (
                           <td className={row.isNested ? 'stats-name-cell stats-name-cell--nested' : 'stats-name-cell'}>
+                            {row.hasChildren ? (
+                              <button
+                                type="button"
+                                className="stats-collapse-btn"
+                                onClick={() => setCollapsedGroups((prev) => {
+                                  const next = new Set(prev)
+                                  if (next.has(row.name)) {
+                                    next.delete(row.name)
+                                  } else {
+                                    next.add(row.name)
+                                  }
+                                  return next
+                                })}
+                              >
+                                {collapsedGroups.has(row.name) ? '▶' : '▼'}
+                              </button>
+                            ) : null}
                             {row.name}
                           </td>
                         ) : null}
@@ -2083,7 +2154,7 @@ export function LoadTestingScreen() {
                         ) : null}
                         {visibleColumns.includes('rps') ? <td>{formatMaybeNumber(row.rps, 1)}</td> : null}
                         {visibleColumns.includes('failureRate') ? (
-                          <td>{(row.failureRate * 100).toFixed(2)}%</td>
+                          <td style={failureRateStyle(row.failureRate)}>{(row.failureRate * 100).toFixed(2)}%</td>
                         ) : null}
                       </tr>
                     ))
@@ -2974,10 +3045,10 @@ export function LoadTestingScreen() {
       <ResourceCreateModal
         open={resourceModalOpen}
         resourceNames={resourceNames}
+        resourceCounts={resourceCounts}
         selectedResourceName={selectedResourceName}
         countValue={resourceCountInput}
         creating={creatingResource}
-        existingResourcesLabel={existingResourcesLabel}
         onClose={() => setResourceModalOpen(false)}
         onResourceChange={setResourceNameInput}
         onCountChange={setResourceCountInput}

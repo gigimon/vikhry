@@ -149,6 +149,8 @@ export interface ProbeHistoryResponse {
 export interface StatsRow {
   name: string
   isNested?: boolean
+  parentName?: string
+  hasChildren?: boolean
   success: number
   failure: number
   medianMs: number | null

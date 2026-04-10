@@ -377,7 +377,7 @@ async def test_runtime_does_not_run_steps_when_on_init_fails_spec() -> None:
     assert _InitFailVU.step_calls == 0
     assert len(repo.metric_events) == 1
     metric_id, event = repo.metric_events[0]
-    assert metric_id == "lifecycle/on_init"
+    assert metric_id == "Setup/lifecycle/on_init"
     assert event["source"] == "lifecycle"
     assert event["stage"] == "on_init"
     assert event["result_code"] == "LIFECYCLE_EXCEPTION"
@@ -405,7 +405,7 @@ async def test_runtime_does_not_run_steps_when_on_start_fails_spec() -> None:
     assert _StartFailVU.step_calls == 0
     assert len(repo.metric_events) == 1
     metric_id, event = repo.metric_events[0]
-    assert metric_id == "lifecycle/on_start"
+    assert metric_id == "Setup/lifecycle/on_start"
     assert event["source"] == "lifecycle"
     assert event["stage"] == "on_start"
     assert event["result_code"] == "LIFECYCLE_EXCEPTION"

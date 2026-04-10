@@ -432,6 +432,22 @@ body {
   padding-bottom: 24px !important;
 }
 
+.stats-collapse-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-right: 6px;
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.stats-collapse-btn:hover {
+  color: #64748b;
+}
+
 .stats-name-cell--nested {
   padding-left: 40px !important;
   position: relative;

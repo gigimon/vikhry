@@ -3,23 +3,25 @@ import { Plus, X } from 'lucide-react'
 interface ResourceCreateModalProps {
   open: boolean
   resourceNames: string[]
+  resourceCounts: Record<string, number>
   selectedResourceName: string
   countValue: string
   creating: boolean
-  existingResourcesLabel: string | null
   onClose: () => void
   onResourceChange: (resourceName: string) => void
   onCountChange: (count: string) => void
   onCreate: () => void | Promise<void>
 }
 
+const numberFormatter = new Intl.NumberFormat('en-US')
+
 export function ResourceCreateModal({
   open,
   resourceNames,
+  resourceCounts,
   selectedResourceName,
   countValue,
   creating,
-  existingResourcesLabel,
   onClose,
   onResourceChange,
   onCountChange,
@@ -30,6 +32,7 @@ export function ResourceCreateModal({
   }
 
   const createDisabled = creating || resourceNames.length === 0 || !selectedResourceName
+  const selectedCount = resourceCounts[selectedResourceName] ?? 0
 
   return (
     <div className="modal-overlay" role="presentation" onClick={onClose}>
@@ -55,7 +58,7 @@ export function ResourceCreateModal({
               ) : (
                 resourceNames.map((resourceName) => (
                   <option key={resourceName} value={resourceName}>
-                    {resourceName}
+                    {resourceName} ({numberFormatter.format(resourceCounts[resourceName] ?? 0)})
                   </option>
                 ))
               )}
@@ -74,11 +77,12 @@ export function ResourceCreateModal({
             />
           </label>
 
-          {existingResourcesLabel ? (
-            <p className="field__hint">Existing resources: {existingResourcesLabel}</p>
-          ) : (
-            <p className="field__hint">No resources found. Refresh resources or create them via API first.</p>
-          )}
+          <p className="field__hint">
+            Existing: <strong>{numberFormatter.format(selectedCount)}</strong>
+            {countValue && Number(countValue) > 0 ? (
+              <> → after create: <strong>{numberFormatter.format(selectedCount + Number(countValue))}</strong></>
+            ) : null}
+          </p>
         </div>
 
         <footer className="modal__footer">
