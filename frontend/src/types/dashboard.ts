@@ -148,6 +148,7 @@ export interface ProbeHistoryResponse {
 
 export interface StatsRow {
   name: string
+  metricId?: string
   isNested?: boolean
   parentName?: string
   hasChildren?: boolean

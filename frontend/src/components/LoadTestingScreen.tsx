@@ -850,10 +850,13 @@ export function LoadTestingScreen() {
   const [scenarioError, setScenarioError] = useState<string | null>(null)
   const [initParamValues, setInitParamValues] = useState<Record<string, string>>({})
   const [selectedTracebackCategory, setSelectedTracebackCategory] = useState('all')
+  const [selectedErrorsMetric, setSelectedErrorsMetric] = useState('all')
+  const [errorsMetricOpen, setErrorsMetricOpen] = useState(false)
 
   const columnsContainerRef = useRef<HTMLDivElement | null>(null)
   const sourcesContainerRef = useRef<HTMLDivElement | null>(null)
   const errorsCategoryContainerRef = useRef<HTMLDivElement | null>(null)
+  const errorsMetricContainerRef = useRef<HTMLDivElement | null>(null)
   const rpsMetricsContainerRef = useRef<HTMLDivElement | null>(null)
   const rpsUsersContainerRef = useRef<HTMLDivElement | null>(null)
   const rpsRangeContainerRef = useRef<HTMLDivElement | null>(null)
@@ -1103,12 +1106,25 @@ export function LoadTestingScreen() {
     return Array.from(values).sort((a, b) => a.localeCompare(b))
   }, [tracebackRows])
 
-  const filteredTracebackRows = useMemo(() => {
-    if (selectedTracebackCategory === 'all') {
-      return tracebackRows
+  const tracebackMetricIds = useMemo(() => {
+    const values = new Set<string>()
+    for (const row of tracebackRows) {
+      values.add(row.metricId)
     }
-    return tracebackRows.filter((row) => row.category === selectedTracebackCategory)
-  }, [selectedTracebackCategory, tracebackRows])
+    return Array.from(values).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+  }, [tracebackRows])
+
+  const filteredTracebackRows = useMemo(() => {
+    return tracebackRows.filter((row) => {
+      if (selectedTracebackCategory !== 'all' && row.category !== selectedTracebackCategory) {
+        return false
+      }
+      if (selectedErrorsMetric !== 'all' && row.metricId !== selectedErrorsMetric) {
+        return false
+      }
+      return true
+    })
+  }, [selectedTracebackCategory, selectedErrorsMetric, tracebackRows])
 
   const selectedSourcesSummary = useMemo(() => {
     if (availableSources.length === 0) {
@@ -1125,6 +1141,8 @@ export function LoadTestingScreen() {
 
   const selectedErrorsCategoryLabel =
     selectedTracebackCategory === 'all' ? 'All categories' : selectedTracebackCategory
+  const selectedErrorsMetricLabel =
+    selectedErrorsMetric === 'all' ? 'All metrics' : selectedErrorsMetric
 
   useEffect(() => {
     const currentStatus = statusLabel(ready?.state)
@@ -1550,6 +1568,24 @@ export function LoadTestingScreen() {
     setErrorsCategoryOpen(false)
   }, [])
 
+  const toggleErrorsMetricMenu = useCallback(() => {
+    setErrorsMetricOpen((c) => !c)
+    setErrorsCategoryOpen(false)
+    setColumnsOpen(false)
+    setSourcesOpen(false)
+  }, [])
+
+  const selectErrorsMetric = useCallback((value: string) => {
+    setSelectedErrorsMetric(value)
+    setErrorsMetricOpen(false)
+  }, [])
+
+  const navigateToErrorsForMetric = useCallback((metricId: string) => {
+    setSelectedErrorsMetric(metricId)
+    setSelectedTracebackCategory('all')
+    setActiveTab('errors')
+  }, [])
+
   const toggleRpsMetric = useCallback((metricId: string) => {
     setRpsSelectionTouched(true)
     setSelectedRpsMetrics((current) => {
@@ -1775,6 +1811,7 @@ export function LoadTestingScreen() {
       !columnsOpen &&
       !sourcesOpen &&
       !errorsCategoryOpen &&
+      !errorsMetricOpen &&
       !rpsMetricsOpen &&
       !rpsUsersOpen &&
       !rpsRangeOpen &&
@@ -1794,6 +1831,9 @@ export function LoadTestingScreen() {
       }
       if (errorsCategoryOpen && !errorsCategoryContainerRef.current?.contains(target)) {
         setErrorsCategoryOpen(false)
+      }
+      if (errorsMetricOpen && !errorsMetricContainerRef.current?.contains(target)) {
+        setErrorsMetricOpen(false)
       }
       if (rpsMetricsOpen && !rpsMetricsContainerRef.current?.contains(target)) {
         setRpsMetricsOpen(false)
@@ -1819,6 +1859,7 @@ export function LoadTestingScreen() {
   }, [
     columnsOpen,
     errorsCategoryOpen,
+    errorsMetricOpen,
     latencyMetricsOpen,
     latencyTypeOpen,
     rpsMetricsOpen,
@@ -2145,7 +2186,21 @@ export function LoadTestingScreen() {
                           </td>
                         ) : null}
                         {visibleColumns.includes('success') ? <td>{numberFormatter.format(row.success)}</td> : null}
-                        {visibleColumns.includes('failure') ? <td>{numberFormatter.format(row.failure)}</td> : null}
+                        {visibleColumns.includes('failure') ? (
+                          <td>
+                            {row.failure > 0 && row.metricId ? (
+                              <button
+                                type="button"
+                                className="stats-failure-link"
+                                onClick={() => navigateToErrorsForMetric(row.metricId!)}
+                              >
+                                {numberFormatter.format(row.failure)}
+                              </button>
+                            ) : (
+                              numberFormatter.format(row.failure)
+                            )}
+                          </td>
+                        ) : null}
                         {visibleColumns.includes('medianMs') ? <td>{formatMaybeNumber(row.medianMs)}</td> : null}
                         {visibleColumns.includes('p95Ms') ? <td>{formatMaybeNumber(row.p95Ms)}</td> : null}
                         {visibleColumns.includes('p99Ms') ? <td>{formatMaybeNumber(row.p99Ms)}</td> : null}
@@ -2300,40 +2355,77 @@ export function LoadTestingScreen() {
           <>
             <section className="section-header">
               <h1>Errors</h1>
-              <div className="columns-control errors-controls" ref={errorsCategoryContainerRef}>
-                <button className="btn" type="button" onClick={toggleErrorsCategoryMenu}>
-                  <span>{selectedErrorsCategoryLabel}</span>
-                  <ChevronDown size={12} />
-                </button>
-                {errorsCategoryOpen ? (
-                  <div className="columns-menu">
-                    <button
-                      type="button"
-                      className={
-                        selectedTracebackCategory === 'all'
-                          ? 'columns-menu__option columns-menu__option--active'
-                          : 'columns-menu__option'
-                      }
-                      onClick={() => selectErrorsCategory('all')}
-                    >
-                      All categories
-                    </button>
-                    {tracebackCategories.map((category) => (
+              <div className="errors-controls">
+                <div className="columns-control" ref={errorsMetricContainerRef}>
+                  <button className="btn" type="button" onClick={toggleErrorsMetricMenu}>
+                    <span>{selectedErrorsMetricLabel}</span>
+                    <ChevronDown size={12} />
+                  </button>
+                  {errorsMetricOpen ? (
+                    <div className="columns-menu">
                       <button
-                        key={category}
                         type="button"
                         className={
-                          selectedTracebackCategory === category
+                          selectedErrorsMetric === 'all'
                             ? 'columns-menu__option columns-menu__option--active'
                             : 'columns-menu__option'
                         }
-                        onClick={() => selectErrorsCategory(category)}
+                        onClick={() => selectErrorsMetric('all')}
                       >
-                        {category}
+                        All metrics
                       </button>
-                    ))}
-                  </div>
-                ) : null}
+                      {tracebackMetricIds.map((id) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={
+                            selectedErrorsMetric === id
+                              ? 'columns-menu__option columns-menu__option--active'
+                              : 'columns-menu__option'
+                          }
+                          onClick={() => selectErrorsMetric(id)}
+                        >
+                          {id}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="columns-control" ref={errorsCategoryContainerRef}>
+                  <button className="btn" type="button" onClick={toggleErrorsCategoryMenu}>
+                    <span>{selectedErrorsCategoryLabel}</span>
+                    <ChevronDown size={12} />
+                  </button>
+                  {errorsCategoryOpen ? (
+                    <div className="columns-menu">
+                      <button
+                        type="button"
+                        className={
+                          selectedTracebackCategory === 'all'
+                            ? 'columns-menu__option columns-menu__option--active'
+                            : 'columns-menu__option'
+                        }
+                        onClick={() => selectErrorsCategory('all')}
+                      >
+                        All categories
+                      </button>
+                      {tracebackCategories.map((category) => (
+                        <button
+                          key={category}
+                          type="button"
+                          className={
+                            selectedTracebackCategory === category
+                              ? 'columns-menu__option columns-menu__option--active'
+                              : 'columns-menu__option'
+                          }
+                          onClick={() => selectErrorsCategory(category)}
+                        >
+                          {category}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </section>
 

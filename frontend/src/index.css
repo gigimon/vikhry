@@ -448,6 +448,23 @@ body {
   color: #64748b;
 }
 
+.stats-failure-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #ef4444;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.stats-failure-link:hover {
+  color: #dc2626;
+  text-decoration-style: solid;
+}
+
 .stats-name-cell--nested {
   padding-left: 40px !important;
   position: relative;
