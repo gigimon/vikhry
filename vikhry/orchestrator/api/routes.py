@@ -136,6 +136,7 @@ def register_routes(
             result = await lifecycle_service.start_test(
                 model.target_users,
                 model.init_params,
+                spawn_interval_ms=model.spawn_interval_ms,
             )
             return asdict(result)
         except Exception as exc:  # noqa: BLE001
@@ -152,7 +153,10 @@ def register_routes(
             if "users" in payload and "target_users" not in payload:
                 payload["target_users"] = payload.pop("users")
             model = ChangeUsersRequest.model_validate(payload)
-            result = await lifecycle_service.change_users(model.target_users)
+            result = await lifecycle_service.change_users(
+                model.target_users,
+                spawn_interval_ms=model.spawn_interval_ms,
+            )
             return asdict(result)
         except Exception as exc:  # noqa: BLE001
             return _exception_to_response(exc)

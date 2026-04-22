@@ -124,6 +124,7 @@ export async function fetchScenarioOnInitSpec(): Promise<ScenarioOnInitSpec> {
 export async function startTest(payload: {
   target_users: number
   init_params?: Record<string, unknown>
+  spawn_interval_ms?: number
 }): Promise<void> {
   await requestJson('/start_test', {
     method: 'POST',
@@ -144,7 +145,10 @@ export async function stopTest(): Promise<void> {
   })
 }
 
-export async function changeUsers(payload: { target_users: number }): Promise<void> {
+export async function changeUsers(payload: {
+  target_users: number
+  spawn_interval_ms?: number
+}): Promise<void> {
   await requestJson('/change_users', {
     method: 'POST',
     headers: {

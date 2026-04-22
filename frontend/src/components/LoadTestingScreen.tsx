@@ -826,7 +826,9 @@ export function LoadTestingScreen() {
   const [notifications, setNotifications] = useState<NotificationItem[]>([])
 
   const [targetUsersInput, setTargetUsersInput] = useState('1000')
+  const [startSpawnIntervalInput, setStartSpawnIntervalInput] = useState('0')
   const [changeUsersInput, setChangeUsersInput] = useState('0')
+  const [changeSpawnIntervalInput, setChangeSpawnIntervalInput] = useState('0')
   const [resourceNameInput, setResourceNameInput] = useState('')
   const [resourceCountInput, setResourceCountInput] = useState('1')
   const [selectedRpsMetrics, setSelectedRpsMetrics] = useState<string[]>([])
@@ -1416,6 +1418,15 @@ export function LoadTestingScreen() {
       pushNotification('error', 'Users must be an integer >= 0.')
       return
     }
+    const spawnIntervalMs = Number(startSpawnIntervalInput)
+    if (
+      !Number.isInteger(spawnIntervalMs) ||
+      spawnIntervalMs < 0 ||
+      spawnIntervalMs > 60_000
+    ) {
+      pushNotification('error', 'Spawn interval must be an integer in [0, 60000] ms.')
+      return
+    }
 
     const initParams: Record<string, unknown> = {}
     if (scenarioSpec) {
@@ -1437,6 +1448,7 @@ export function LoadTestingScreen() {
       await startTest({
         target_users: targetUsers,
         init_params: initParams,
+        spawn_interval_ms: spawnIntervalMs,
       })
       setStartModalOpen(false)
       pushNotification('success', 'Start command sent.')
@@ -1446,7 +1458,14 @@ export function LoadTestingScreen() {
     } finally {
       setStarting(false)
     }
-  }, [initParamValues, pushNotification, refresh, scenarioSpec, targetUsersInput])
+  }, [
+    initParamValues,
+    pushNotification,
+    refresh,
+    scenarioSpec,
+    startSpawnIntervalInput,
+    targetUsersInput,
+  ])
 
   const onChangeUsers = useCallback(async () => {
     const targetUsers = Number(changeUsersInput)
@@ -1454,10 +1473,22 @@ export function LoadTestingScreen() {
       pushNotification('error', 'Users must be an integer >= 0.')
       return
     }
+    const spawnIntervalMs = Number(changeSpawnIntervalInput)
+    if (
+      !Number.isInteger(spawnIntervalMs) ||
+      spawnIntervalMs < 0 ||
+      spawnIntervalMs > 60_000
+    ) {
+      pushNotification('error', 'Spawn interval must be an integer in [0, 60000] ms.')
+      return
+    }
 
     try {
       setChangingUsers(true)
-      await changeUsers({ target_users: targetUsers })
+      await changeUsers({
+        target_users: targetUsers,
+        spawn_interval_ms: spawnIntervalMs,
+      })
       setChangeUsersModalOpen(false)
       pushNotification('success', 'Users change command sent.')
       await refresh()
@@ -1469,7 +1500,7 @@ export function LoadTestingScreen() {
     } finally {
       setChangingUsers(false)
     }
-  }, [changeUsersInput, pushNotification, refresh])
+  }, [changeSpawnIntervalInput, changeUsersInput, pushNotification, refresh])
 
   const onCreateResource = useCallback(async () => {
     const name = selectedResourceName.trim()
@@ -3022,6 +3053,22 @@ export function LoadTestingScreen() {
                 <span className="field__hint">Maximum concurrent users for this test run.</span>
               </label>
 
+              <label className="field">
+                <span className="field__label">Spawn interval (ms)</span>
+                <input
+                  className="field__input"
+                  type="number"
+                  min={0}
+                  max={60000}
+                  step={10}
+                  value={startSpawnIntervalInput}
+                  onChange={(event) => setStartSpawnIntervalInput(event.target.value)}
+                />
+                <span className="field__hint">
+                  Pause between spawning each VU. 0 = all at once.
+                </span>
+              </label>
+
               <section className="params-card">
                 <h3>Initialize parameters</h3>
                 {scenarioLoading ? <p className="params-card__state">Loading scenario params...</p> : null}
@@ -3108,6 +3155,22 @@ export function LoadTestingScreen() {
                   onChange={(event) => setChangeUsersInput(event.target.value)}
                 />
                 <span className="field__hint">Target concurrent users for current running test.</span>
+              </label>
+
+              <label className="field">
+                <span className="field__label">Spawn interval (ms)</span>
+                <input
+                  className="field__input"
+                  type="number"
+                  min={0}
+                  max={60000}
+                  step={10}
+                  value={changeSpawnIntervalInput}
+                  onChange={(event) => setChangeSpawnIntervalInput(event.target.value)}
+                />
+                <span className="field__hint">
+                  Pause between spawning each new VU. 0 = all at once. Ignored when decreasing.
+                </span>
               </label>
             </div>
 

@@ -77,10 +77,29 @@ class _FakeUserOrchestration:
         self.fail_start = False
         self.calls: list[str] = []
 
-    async def add_users(self, user_ids, epoch):  # noqa: ANN001
+    async def add_users(
+        self,
+        user_ids,  # noqa: ANN001
+        epoch,  # noqa: ANN001
+        *,
+        spawn_interval_ms: int = 0,
+        expected_states=None,  # noqa: ANN001
+        timeline_source: str | None = None,
+        initial_user_count: int = 0,
+    ):
         self.calls.append("add_users")
         self._state_repo.users.extend(str(user_id) for user_id in user_ids)
-        return {"requested": len(user_ids)}
+        if timeline_source is not None:
+            await self._state_repo.append_users_timeline_event(
+                epoch=epoch,
+                users_count=initial_user_count + len(user_ids),
+                source=timeline_source,
+            )
+        return {
+            "requested": len(user_ids),
+            "aborted": False,
+            "spawn_interval_ms": spawn_interval_ms,
+        }
 
     async def remove_users(self, user_ids, epoch):  # noqa: ANN001
         for user_id in user_ids:

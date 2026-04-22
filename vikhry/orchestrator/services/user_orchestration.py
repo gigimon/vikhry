@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -15,6 +16,7 @@ from vikhry.orchestrator.models.command import (
     StartTestPayload,
     StopTestPayload,
 )
+from vikhry.orchestrator.models.test_state import TestState
 from vikhry.orchestrator.models.user import UserAssignment, UserRuntimeStatus
 from vikhry.orchestrator.redis_repo.state_repo import TestStateRepository
 from vikhry.orchestrator.services.worker_presence import WorkerPresenceService
@@ -39,20 +41,35 @@ class UserOrchestrationService:
         worker_presence: WorkerPresenceService,
         now_fn: Callable[[], float] | None = None,
         command_id_fn: Callable[[], str] | None = None,
+        sleep_fn: Callable[[float], Any] | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._worker_presence = worker_presence
         self._now_fn = now_fn or time.time
         self._command_id_fn = command_id_fn or (lambda: str(uuid4()))
+        self._sleep_fn = sleep_fn or asyncio.sleep
 
-    async def add_users(self, user_ids: Sequence[int | str], epoch: int) -> dict[str, Any]:
+    async def add_users(
+        self,
+        user_ids: Sequence[int | str],
+        epoch: int,
+        *,
+        spawn_interval_ms: int = 0,
+        expected_states: tuple[TestState, ...] | None = None,
+        timeline_source: str | None = None,
+        initial_user_count: int = 0,
+    ) -> dict[str, Any]:
         alive_workers = await self._worker_presence.require_alive_workers()
         allocations = allocate_round_robin(user_ids, alive_workers)
         added: list[dict[str, str]] = []
         skipped_existing: list[str] = []
         now_ts = self._now_ts()
+        total = len(allocations)
+        # Event every ~N/50 users so the ramp-up curve has <=50 points.
+        timeline_every = max(1, total // 50) if timeline_source else 0
+        aborted = False
 
-        for user_id, worker_id in allocations:
+        for index, (user_id, worker_id) in enumerate(allocations):
             existing = await self._state_repo.get_user_assignment(user_id)
             if existing is not None:
                 skipped_existing.append(user_id)
@@ -71,11 +88,30 @@ class UserOrchestrationService:
             )
             added.append({"user_id": user_id, "worker_id": worker_id})
 
+            is_last = index == total - 1
+            added_count = len(added)
+            if timeline_source and (is_last or added_count % timeline_every == 0):
+                await self._state_repo.append_users_timeline_event(
+                    epoch=epoch,
+                    users_count=initial_user_count + added_count,
+                    source=timeline_source,
+                )
+
+            if spawn_interval_ms > 0 and not is_last:
+                await self._sleep_fn(spawn_interval_ms / 1000)
+                if expected_states is not None:
+                    current_state = await self._state_repo.get_state()
+                    if current_state not in expected_states:
+                        aborted = True
+                        break
+
         return {
             "requested": len(user_ids),
             "added": added,
             "skipped_existing": skipped_existing,
             "alive_workers": list(alive_workers),
+            "aborted": aborted,
+            "spawn_interval_ms": spawn_interval_ms,
         }
 
     async def remove_users(self, user_ids: Sequence[int | str], epoch: int) -> dict[str, Any]:

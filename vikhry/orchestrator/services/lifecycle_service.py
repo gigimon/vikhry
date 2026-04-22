@@ -31,6 +31,7 @@ class StartTestResult:
     epoch: int
     target_users: int
     init_params: dict[str, Any]
+    spawn_interval_ms: int
     prepare_result: dict[str, object]
     add_result: dict[str, object]
     start_result: dict[str, object]
@@ -41,6 +42,7 @@ class ChangeUsersResult:
     epoch: int
     target_users: int
     current_users: int
+    spawn_interval_ms: int
     action: str
     result: dict[str, object]
 
@@ -83,13 +85,17 @@ class LifecycleService:
         self,
         target_users: int,
         init_params: dict[str, Any] | None = None,
+        spawn_interval_ms: int = 0,
     ) -> StartTestResult:
         if target_users < 0:
             raise ValueError("target_users must be >= 0")
+        if spawn_interval_ms < 0:
+            raise ValueError("spawn_interval_ms must be >= 0")
         resolved_init_params = dict(init_params or {})
         logger.info(
-            "start_test requested target_users=%s init_param_keys=%s",
+            "start_test requested target_users=%s spawn_interval_ms=%s init_param_keys=%s",
             target_users,
+            spawn_interval_ms,
             sorted(resolved_init_params.keys()),
         )
 
@@ -115,28 +121,35 @@ class LifecycleService:
                 resolved_init_params,
             )
             user_ids = list(range(1, target_users + 1))
-            add_result = await self._user_orchestration.add_users(user_ids, epoch)
-            await self._state_repo.set_all_users_status(
-                status=UserRuntimeStatus.RUNNING,
-                updated_at=self._now_ts(),
+            add_result = await self._user_orchestration.add_users(
+                user_ids,
+                epoch,
+                spawn_interval_ms=spawn_interval_ms,
+                expected_states=(TestState.PREPARING,),
+                timeline_source="start_test",
+                initial_user_count=0,
             )
-            await self._state_repo.set_state(TestState.RUNNING)
-            await self._state_repo.append_users_timeline_event(
-                epoch=epoch,
-                users_count=target_users,
-                source="start_test",
-            )
+            if not add_result.get("aborted"):
+                await self._state_repo.set_all_users_status(
+                    status=UserRuntimeStatus.RUNNING,
+                    updated_at=self._now_ts(),
+                )
+                await self._state_repo.compare_and_set_state(
+                    TestState.PREPARING, TestState.RUNNING
+                )
             logger.info(
-                "start_test completed epoch=%s target_users=%s workers_started=%s users_added=%s",
+                "start_test completed epoch=%s target_users=%s workers_started=%s users_added=%s aborted=%s",
                 epoch,
                 target_users,
                 start_result.get("delivered"),
                 add_result.get("requested"),
+                add_result.get("aborted"),
             )
             return StartTestResult(
                 epoch=epoch,
                 target_users=target_users,
                 init_params=resolved_init_params,
+                spawn_interval_ms=spawn_interval_ms,
                 prepare_result=prepare_result,
                 add_result=add_result,
                 start_result=start_result,
@@ -157,9 +170,15 @@ class LifecycleService:
             logger.info("start_test rollback completed epoch=%s state=%s", epoch, TestState.IDLE.value)
             raise
 
-    async def change_users(self, target_users: int) -> ChangeUsersResult:
+    async def change_users(
+        self,
+        target_users: int,
+        spawn_interval_ms: int = 0,
+    ) -> ChangeUsersResult:
         if target_users < 0:
             raise ValueError("target_users must be >= 0")
+        if spawn_interval_ms < 0:
+            raise ValueError("spawn_interval_ms must be >= 0")
 
         state = await self._state_repo.get_state()
         if state != TestState.RUNNING:
@@ -178,6 +197,7 @@ class LifecycleService:
                 epoch=epoch,
                 target_users=target_users,
                 current_users=current_users,
+                spawn_interval_ms=spawn_interval_ms,
                 action="noop",
                 result={"requested": 0},
             )
@@ -188,17 +208,25 @@ class LifecycleService:
                 existing_user_ids=current_user_ids,
                 count=target_users - current_users,
             )
-            add_result = await self._user_orchestration.add_users(user_ids, epoch)
-            add_result["prepare_result"] = prepare_result
-            await self._state_repo.append_users_timeline_event(
-                epoch=epoch,
-                users_count=target_users,
-                source="change_users",
+            add_result = await self._user_orchestration.add_users(
+                user_ids,
+                epoch,
+                spawn_interval_ms=spawn_interval_ms,
+                expected_states=(TestState.RUNNING,),
+                timeline_source="change_users",
+                initial_user_count=current_users,
             )
+            add_result["prepare_result"] = prepare_result
+            if not add_result.get("aborted"):
+                await self._state_repo.set_all_users_status(
+                    status=UserRuntimeStatus.RUNNING,
+                    updated_at=self._now_ts(),
+                )
             return ChangeUsersResult(
                 epoch=epoch,
                 target_users=target_users,
                 current_users=current_users,
+                spawn_interval_ms=spawn_interval_ms,
                 action="add",
                 result=add_result,
             )
@@ -217,6 +245,7 @@ class LifecycleService:
             epoch=epoch,
             target_users=target_users,
             current_users=current_users,
+            spawn_interval_ms=spawn_interval_ms,
             action="remove",
             result=remove_result,
         )
